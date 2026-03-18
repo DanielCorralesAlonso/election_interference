@@ -6,10 +6,22 @@ from hmmlearn.hmm import PoissonHMM
 from scipy.optimize import minimize
 from scipy.special import gammaln
 from scipy.stats import poisson, nbinom, norm, kstest, probplot
+from statsmodels.stats.diagnostic import acorr_ljungbox
 import warnings
 import os
 
 warnings.filterwarnings("ignore")
+
+# Make all plots publication-ready with larger fonts
+plt.rcParams.update({
+    'font.size': 14,          # Global font size
+    'axes.titlesize': 16,     # Subplot titles
+    'axes.labelsize': 14,     # X/Y axis labels
+    'xtick.labelsize': 12,    # X tick marks
+    'ytick.labelsize': 12,    # Y tick marks
+    'legend.fontsize': 12,    # Legend text
+    'figure.titlesize': 18    # Main overarching title
+})
 
 # ==========================================
 # 1. EVALUATION METRICS
@@ -56,37 +68,94 @@ def extract_hawkes_catalysts(dates, actual_counts, predicted_intensity, mu_basel
 # ==========================================
 # 2. MODELS WITH UNCERTAINTY BANDS
 # ==========================================
-def fit_ar(ts, lags=7):
-    log_ts = np.log1p(ts)
-    model = AutoReg(log_ts, lags=lags).fit()
+import numpy as np
+from scipy.optimize import minimize
+from scipy.special import gammaln
+from scipy.stats import poisson, nbinom, norm
+from scipy.optimize import minimize
+from scipy.stats import binom, poisson, norm
+
+def fit_discrete_ar(ts, lags=1, likelihood='poisson'):
+    """
+    Fits a Discrete Autoregressive model (Poisson or Negative Binomial).
+    This outputs true discrete log-likelihoods, allowing direct AIC/BIC 
+    comparisons with the discrete Hawkes processes.
+    """
+    n = len(ts)
     
-    # Get predictions and Confidence Intervals in log space
-    pred_obj = model.get_prediction(start=lags, end=len(ts)-1, dynamic=False)
-    log_preds = pred_obj.predicted_mean
-    log_ci = pred_obj.conf_int(alpha=0.05) # 95% CI
-    
-    # FIX: Ensure log_ci is treated as a numpy array so slicing [:, 0] works universally
-    if hasattr(log_ci, 'values'):
-        log_ci = log_ci.values
+    def obj_func(params, counts):
+        if likelihood == 'poisson':
+            mu = params[0]
+            alphas = params[1:]
+        else:
+            mu = params[0]
+            alphas = params[1:-1]
+            r = params[-1]
+            if r <= 1e-5: return 1e9
+            
+        if mu <= 1e-5 or any(a <= 1e-5 for a in alphas) or sum(alphas) >= 1.0: 
+            return 1e9 # Prevent negative intensities or explosive non-stationary processes
         
-    # Reconstruct arrays to match original length
-    preds = np.zeros(len(ts))
-    lower = np.zeros(len(ts))
-    upper = np.zeros(len(ts))
+        intensity = np.full(n, mu)
+        
+        # Calculate AR intensity
+        for t in range(lags, n):
+            for i in range(lags):
+                intensity[t] += alphas[i] * counts[t - 1 - i]
+                
+        log_lik = 0
+        # Only evaluate likelihood AFTER the warmup period (t >= lags)
+        for t in range(lags, n):
+            if likelihood == 'poisson':
+                log_lik += counts[t] * np.log(intensity[t] + 1e-10) - intensity[t] - gammaln(counts[t] + 1)
+            else:
+                term1 = gammaln(counts[t] + r) - gammaln(r) - gammaln(counts[t] + 1)
+                term2 = r * np.log(r + 1e-10) - r * np.log(r + intensity[t] + 1e-10)
+                term3 = counts[t] * np.log(intensity[t] + 1e-10) - counts[t] * np.log(r + intensity[t] + 1e-10)
+                log_lik += term1 + term2 + term3
+                
+        return -log_lik
+
+    # Initial guesses and bounds
+    x0 = [np.mean(ts) * 0.5] + [0.1] * lags
+    bounds = [(1e-2, None)] + [(1e-5, 0.99)] * lags
+    if likelihood == 'neg_binomial':
+        x0.append(1.0)
+        bounds.append((1e-2, None))
+
+    res = minimize(obj_func, x0=x0, args=(ts,), bounds=bounds, method='L-BFGS-B')
     
-    # Fill first 'lags' days with actuals (no uncertainty)
-    preds[:lags] = lower[:lags] = upper[:lags] = ts[:lags]
-    
-    # FIX: Exponentiate using standard numpy array indexing [:, 0] instead of .iloc
-    preds[lags:] = np.maximum(np.expm1(log_preds), 0)
-    lower[lags:] = np.maximum(np.expm1(log_ci[:, 0]), 0) 
-    upper[lags:] = np.maximum(np.expm1(log_ci[:, 1]), 0) 
-    
-    # FIX: Make parameter extraction robust to both Pandas Series and Numpy Arrays
-    p_array = model.params.values if hasattr(model.params, 'values') else model.params
-    params = {'intercept': round(p_array[0], 2), 'lag_1': round(p_array[1], 2)}
-    
-    return preds, lower, upper, params, model.llf, len(model.params)
+    # Extract parameters
+    if likelihood == 'poisson':
+        mu = res.x[0]
+        alphas = res.x[1:]
+        params = {'mu': round(mu, 2)}
+        for i, a in enumerate(alphas): params[f'lag_{i+1}'] = round(a, 3)
+        k = 1 + lags
+    else:
+        mu = res.x[0]
+        alphas = res.x[1:-1]
+        r = res.x[-1]
+        params = {'mu': round(mu, 2), 'r': round(r, 2)}
+        for i, a in enumerate(alphas): params[f'lag_{i+1}'] = round(a, 3)
+        k = 2 + lags
+
+    # Rebuild full intensity array
+    intensity = np.full(n, mu)
+    for t in range(lags, n):
+        for i in range(lags):
+            intensity[t] += alphas[i] * ts[t - 1 - i]
+            
+    # Calculate 95% Confidence Intervals
+    if likelihood == 'poisson':
+        lower = poisson.ppf(0.025, intensity)
+        upper = poisson.ppf(0.975, intensity)
+    else:
+        p = r / (r + intensity)
+        lower = nbinom.ppf(0.025, r, p)
+        upper = nbinom.ppf(0.975, r, p)
+        
+    return intensity, lower, upper, params, -res.fun, k
 
 def fit_hawkes(ts, decay=0.8, likelihood='poisson'):
     def obj_func(params, counts, decay, likelihood):
@@ -166,7 +235,6 @@ def fit_hmm(ts, n_components=2):
     upper = poisson.ppf(0.975, preds)
     
     return preds, lower, upper, params, model.score(X), k
-
 
 def fit_poisson_process(ts):
     """
@@ -286,63 +354,183 @@ def fit_hawkes_powerlaw(ts, likelihood='neg_binomial'):
     
     return intensity, lower, upper, params, -res.fun, 4
 
-
-
-
-def evaluate_ar_residuals(actual, predicted, lags, model_name, country_name, output_dir):
-    y_act_log = np.log1p(actual[lags:])
-    y_pred_log = np.log1p(predicted[lags:])
-    raw_res = y_act_log - y_pred_log
-    std_res = (raw_res - np.mean(raw_res)) / (np.std(raw_res) + 1e-10)
+def fit_inar(ts, lags=1):
+    """
+    Fits an Integer-Valued Autoregressive (INAR) model.
+    Currently restricted to INAR(1) to allow for exact Log-Likelihood 
+    computation, which is required for fair AIC/BIC comparisons.
+    """
+    if lags > 1:
+        raise NotImplementedError(
+            "Exact Maximum Likelihood for INAR(p) with p > 1 is computationally "
+            "intractable in simple forms due to multidimensional convolutions. "
+            "Please use lags=1 for an exact likelihood comparison."
+        )
+        
+    n = len(ts)
     
-    ks_stat, p_val = kstest(std_res, 'norm')
-    _plot_qq(std_res, model_name, country_name, ks_stat, p_val, 'orange', output_dir)
-    return ks_stat, p_val
-
-def evaluate_poisson_residuals(actual, predicted_means, model_name, country_name, output_dir):
-    n = len(actual)
-    residuals = np.zeros(n)
-    np.random.seed(42)
-    for t in range(n):
-        y = actual[t]
-        lam = max(predicted_means[t], 1e-5)
-        cdf_y = poisson.cdf(y, lam)
-        cdf_y_minus_1 = 0.0 if y == 0 else poisson.cdf(y - 1, lam)
-        u = np.clip(np.random.uniform(cdf_y_minus_1, cdf_y), 1e-10, 1 - 1e-10)
-        residuals[t] = norm.ppf(u)
+    def obj_func(params, counts):
+        alpha, mu = params
         
-    ks_stat, p_val = kstest(residuals, 'norm')
-    _plot_qq(residuals, model_name, country_name, ks_stat, p_val, 'blue', output_dir)
-    return ks_stat, p_val
-
-def evaluate_nbinom_residuals(actual, predicted_means, r_disp, model_name, country_name, output_dir):
-    n = len(actual)
-    residuals = np.zeros(n)
-    np.random.seed(42)
-    for t in range(n):
-        y = actual[t]
-        mu = max(predicted_means[t], 1e-5)
-        p = r_disp / (r_disp + mu)
-        cdf_y = nbinom.cdf(y, r_disp, p)
-        cdf_y_minus_1 = 0.0 if y == 0 else nbinom.cdf(y - 1, r_disp, p)
-        u = np.clip(np.random.uniform(cdf_y_minus_1, cdf_y), 1e-10, 1 - 1e-10)
-        residuals[t] = norm.ppf(u)
+        # alpha is the survival probability (0 to 1)
+        # mu is the rate of new Poisson arrivals (> 0)
+        if alpha <= 1e-5 or alpha >= 0.999 or mu <= 1e-5: 
+            return 1e9
         
-    ks_stat, p_val = kstest(residuals, 'norm')
-    _plot_qq(residuals, model_name, country_name, ks_stat, p_val, 'red', output_dir)
-    return ks_stat, p_val
+        log_lik = 0
+        
+        # Compute exact log-likelihood using the convolution of Binomial and Poisson
+        for t in range(1, n):
+            y_curr = int(counts[t])
+            y_prev = int(counts[t-1])
+            
+            # The maximum number of events that could have survived from yesterday
+            max_survivors = min(y_curr, y_prev)
+            i_vals = np.arange(max_survivors + 1)
+            
+            # P(i survivors | y_prev events, alpha probability)
+            prob_surv = binom.pmf(i_vals, y_prev, alpha)
+            
+            # P(y_curr - i new arrivals | mu rate)
+            prob_inno = poisson.pmf(y_curr - i_vals, mu)
+            
+            # Sum the probabilities of all valid combinations
+            prob_t = np.sum(prob_surv * prob_inno)
+            
+            # Catch impossible states to prevent log(0)
+            if prob_t <= 0:
+                return 1e9
+                
+            log_lik += np.log(prob_t)
+            
+        return -log_lik
+
+    # Initial guesses: assume 50% survival, and the rest made up by new arrivals
+    x0 = [0.5, np.mean(ts) * 0.5]
+    bounds = [(1e-5, 0.999), (1e-5, None)]
+    
+    res = minimize(obj_func, x0=x0, args=(ts,), bounds=bounds, method='L-BFGS-B')
+    
+    alpha, mu = res.x
+    params = {'alpha': round(alpha, 3), 'mu': round(mu, 2)}
+    
+    # Calculate Conditional Expectation (Intensity)
+    # E[y_t | y_{t-1}] = alpha * y_{t-1} + mu
+    intensity = np.zeros(n)
+    intensity[0] = mu / (1 - alpha)  # Unconditional mean for the first step
+    for t in range(1, n):
+        intensity[t] = alpha * ts[t-1] + mu
+        
+    # Calculate Conditional Variance
+    # Var(y_t | y_{t-1}) = alpha * (1 - alpha) * y_{t-1} + mu
+    cond_var = np.zeros(n)
+    cond_var[0] = mu / (1 - alpha)
+    for t in range(1, n):
+        cond_var[t] = alpha * (1 - alpha) * ts[t-1] + mu
+        
+    # Calculate 95% Confidence Intervals
+    # Because the exact inverse CDF of the convolution is extremely slow to compute,
+    # we use a Gaussian approximation based on the exact conditional mean and variance.
+    lower = np.maximum(0, norm.ppf(0.025, loc=intensity, scale=np.sqrt(cond_var)))
+    upper = np.maximum(0, norm.ppf(0.975, loc=intensity, scale=np.sqrt(cond_var)))
+    
+    return intensity, lower, upper, params, -res.fun, 2 # k=2 parameters (alpha, mu)
+
+
+
+# Calculate Randomized Quantile Residuals for discrete models and perform K-S test
+
+def evaluate_discrete_residuals(actual, predicted_means, model_name, country_name, output_dir, likelihood='poisson', r_disp=None, lags=1, color='blue'):
+    """
+    Evaluates goodness-of-fit using Randomized Quantile Residuals (RQRs).
+    Returns K-S stats (distribution fit) and Ljung-Box stats (autocorrelation).
+    """
+    y_act = actual[lags:]
+    y_pred = predicted_means[lags:]
+    n = len(y_act)
+    
+    residuals = np.zeros(n)
+    u_vals = np.zeros(n) # NEW: We need to store the uniform variables for the PIT plot
+    np.random.seed(42) 
+    
+    for t in range(n):
+        y = y_act[t]
+        mu = max(y_pred[t], 1e-5)
+        
+        if likelihood == 'poisson':
+            cdf_y = poisson.cdf(y, mu)
+            cdf_y_minus_1 = 0.0 if y == 0 else poisson.cdf(y - 1, mu)
+        elif likelihood == 'neg_binomial':
+            p = r_disp / (r_disp + mu)
+            cdf_y = nbinom.cdf(y, r_disp, p)
+            cdf_y_minus_1 = 0.0 if y == 0 else nbinom.cdf(y - 1, r_disp, p)
+            
+        u = np.random.uniform(cdf_y_minus_1, cdf_y)
+        u = np.clip(u, 1e-10, 1 - 1e-10)
+        
+        u_vals[t] = u            # Store Uniform values for PIT
+        residuals[t] = norm.ppf(u) # Transform to Normal for KS / Ljung-Box
+        
+    # Run Kolmogorov-Smirnov Test
+    ks_stat, ks_pval = kstest(residuals, 'norm')
+    
+    # NEW: Run Ljung-Box Test (Testing up to 10 days of lag for leftover autocorrelation)
+    lb_res = acorr_ljungbox(residuals, lags=[7], return_df=True)
+    lb_stat = lb_res['lb_stat'].iloc[0]
+    lb_pval = lb_res['lb_pvalue'].iloc[0]
+    
+    # Generate Plots
+    _plot_qq(residuals, model_name, country_name, ks_stat, ks_pval, color, output_dir)
+    _plot_pit(u_vals, model_name, country_name, color, output_dir) # NEW: PIT Plot
+    
+    return ks_stat, ks_pval, lb_stat, lb_pval
+
+def _plot_pit(u_vals, model_name, country_name, color, output_dir):
+    """
+    Plots a Probability Integral Transform (PIT) Histogram.
+    A perfectly calibrated model will have a flat, uniform histogram.
+    """
+    fig, ax = plt.subplots(figsize=(6, 5))
+    
+    # Plot histogram of the uniform U values
+    counts, bins, patches = ax.hist(u_vals, bins=10, density=True, color=color, alpha=0.6, edgecolor='black')
+    
+    # Add a horizontal line at y=1 (the theoretical ideal for a Uniform distribution)
+    ax.axhline(1.0, color='black', linestyle='--', linewidth=2, label='Ideal Uniform')
+    
+    ax.set_title(f'{model_name} PIT Histogram: {country_name}\n(Flat = Perfectly Calibrated Uncertainty)')
+    ax.set_xlabel('Probability Integral Transform (u)')
+    ax.set_ylabel('Density')
+    ax.set_ylim(0, max(1.5, max(counts) * 1.2)) # Give it some headroom
+    ax.legend()
+    
+    plt.tight_layout()
+    filename = f"{country_name}_{model_name.replace(' ', '_')}_PIT.png"
+    plt.savefig(os.path.join(output_dir, filename), dpi=150)
+    plt.close()
 
 def _plot_qq(residuals, model_name, country_name, ks_stat, p_val, color, output_dir):
+    """
+    Helper function to plot and save Q-Q plots for the residuals.
+    """
     fig, ax = plt.subplots(figsize=(6, 5))
     probplot(residuals, dist="norm", plot=ax)
+    
+    # Styling
     ax.get_lines()[0].set_markerfacecolor(color)
+    ax.get_lines()[0].set_markeredgecolor(color)
     ax.get_lines()[0].set_alpha(0.6)
     ax.get_lines()[1].set_color('black')
     ax.get_lines()[1].set_linestyle('--')
     
     ax.set_title(f'{model_name} Q-Q: {country_name}\nK-S: {ks_stat:.3f} | p-val: {p_val:.3e}')
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, f"{country_name}_{model_name.replace(' ', '_')}_QQ.png"), dpi=150)
+    
+    # Ensure directory exists before saving
+    os.makedirs(output_dir, exist_ok=True)
+    
+    filename = f"{country_name}_{model_name.replace(' ', '_')}_QQ.png"
+    plt.savefig(os.path.join(output_dir, filename), dpi=150)
     plt.close()
 
 # ==========================================
@@ -373,67 +561,87 @@ if __name__ == "__main__":
             print(f"No data found for {country}. Skipping.")
             continue
             
-        # 1. Fit models 
-        ar_p, ar_l, ar_u, ar_params, ar_ll, ar_k = fit_ar(ts, lags=7)
-        pp_p, pp_l, pp_u, pp_params, pp_ll, pp_k = fit_poisson_process(ts) # NEW
-        ihp_p, ihp_l, ihp_u, ihp_params, ihp_ll, ihp_k = fit_inhomogeneous_poisson(ts) # NEW
+        # ==========================================
+        # 1. Fit Models (All operating in Discrete Probability Space)
+        # ==========================================
+        pp_p, pp_l, pp_u, pp_params, pp_ll, pp_k = fit_poisson_process(ts) 
+        ihp_p, ihp_l, ihp_u, ihp_params, ihp_ll, ihp_k = fit_inhomogeneous_poisson(ts) 
+        ar_p, ar_l, ar_u, ar_params, ar_ll, ar_k = fit_discrete_ar(ts, lags=7, likelihood='poisson') # UPDATED
+        inar_p, inar_l, inar_u, inar_params, inar_ll, inar_k = fit_inar(ts, lags=1) # NEW
+        
         hp_p, hp_l, hp_u, hp_params, hp_ll, hp_k = fit_hawkes(ts, decay=0.8, likelihood='poisson')
         hnb_p, hnb_l, hnb_u, hnb_params, hnb_ll, hnb_k = fit_hawkes(ts, decay=0.8, likelihood='neg_binomial')
-        hpow_p, hpow_l, hpow_u, hpow_params, hpow_ll, hpow_k = fit_hawkes_powerlaw(ts) # NEW
+        hpow_p, hpow_l, hpow_u, hpow_params, hpow_ll, hpow_k = fit_hawkes_powerlaw(ts, likelihood='neg_binomial') 
         hmm_p, hmm_l, hmm_u, hmm_params, hmm_ll, hmm_k = fit_hmm(ts, n_components=2)
         
-        # 2. Evaluate Residuals & K-S Tests
-        ks_ar_stat, ks_ar_pval = evaluate_ar_residuals(ts, ar_p, 7, 'AR(7)', country, output_dir)
-        ks_pp_stat, ks_pp_pval = evaluate_poisson_residuals(ts, pp_p, 'Poisson Process', country, output_dir) # NEW
-        ks_ihp_stat, ks_ihp_pval = evaluate_poisson_residuals(ts, ihp_p, 'Inhomogeneous Poisson', country, output_dir) # NEW
-        ks_hp_stat, ks_hp_pval = evaluate_poisson_residuals(ts, hp_p, 'Hawkes (Pois)', country, output_dir)
-        ks_hnb_stat, ks_hnb_pval = evaluate_nbinom_residuals(ts, hnb_p, hnb_params['r'], 'Hawkes (NB Exp)', country, output_dir)
-        ks_hpow_stat, ks_hpow_pval = evaluate_nbinom_residuals(ts, hpow_p, hpow_params['r'], 'Hawkes (NB Pow)', country, output_dir) # NEW
-        ks_hmm_stat, ks_hmm_pval = evaluate_poisson_residuals(ts, hmm_p, 'HMM (2-State)', country, output_dir)
+        # ==========================================
+        # 2. Evaluate Residuals & K-S Tests (Unified)
+        # ==========================================
+        ks_pp_stat, ks_pp_pval, lb_pp_stat, lb_pp_pval = evaluate_discrete_residuals(ts, pp_p, 'Poisson Process', country, output_dir, likelihood='poisson', lags=1, color='gray') 
+        ks_ihp_stat, ks_ihp_pval, lb_ihp_stat, lb_ihp_pval = evaluate_discrete_residuals(ts, ihp_p, 'Inhomogeneous Poisson', country, output_dir, likelihood='poisson', lags=1, color='brown') 
+        ks_ar_stat, ks_ar_pval, lb_ar_stat, lb_ar_pval = evaluate_discrete_residuals(ts, ar_p, 'Discrete AR(7)', country, output_dir, likelihood='poisson', lags=7, color='orange')
+        ks_inar_stat, ks_inar_pval, lb_inar_stat, lb_inar_pval = evaluate_discrete_residuals(ts, inar_p, 'INAR(1)', country, output_dir, likelihood='poisson', lags=1, color='teal')
+        ks_hp_stat, ks_hp_pval, lb_hp_stat, lb_hp_pval = evaluate_discrete_residuals(ts, hp_p, 'Hawkes (Pois)', country, output_dir, likelihood='poisson', lags=1, color='green')
+        ks_hnb_stat, ks_hnb_pval, lb_hnb_stat, lb_hnb_pval = evaluate_discrete_residuals(ts, hnb_p, 'Hawkes (NB Exp)', country, output_dir, likelihood='neg_binomial', r_disp=hnb_params['r'], lags=1, color='red')
+        ks_hpow_stat, ks_hpow_pval, lb_hpow_stat, lb_hpow_pval = evaluate_discrete_residuals(ts, hpow_p, 'Hawkes (NB Pow)', country, output_dir, likelihood='neg_binomial', r_disp=hpow_params['r'], lags=1, color='purple') 
+        ks_hmm_stat, ks_hmm_pval, lb_hmm_stat, lb_hmm_pval = evaluate_discrete_residuals(ts, hmm_p, 'HMM (2-State)', country, output_dir, likelihood='poisson', lags=1, color='blue')
 
-        # 3. Create SUPER Dictionary packing all variables
+        # ==========================================
+        # 3. Create SUPER Dictionary & Calculate Metrics
+        # ==========================================
         models = {
-            'AR(7) *Log*': (ar_p, ar_l, ar_u, ar_params, ar_ll, ar_k, ks_ar_stat, ks_ar_pval),
-            'Poisson Process': (pp_p, pp_l, pp_u, pp_params, pp_ll, pp_k, ks_pp_stat, ks_pp_pval),
-            'Inhomogeneous Poisson': (ihp_p, ihp_l, ihp_u, ihp_params, ihp_ll, ihp_k, ks_ihp_stat, ks_ihp_pval),
-            'Hawkes (Pois Exp)': (hp_p, hp_l, hp_u, hp_params, hp_ll, hp_k, ks_hp_stat, ks_hp_pval),
-            'Hawkes (NB Exp)': (hnb_p, hnb_l, hnb_u, hnb_params, hnb_ll, hnb_k, ks_hnb_stat, ks_hnb_pval),
-            'Hawkes (NB Pow)': (hpow_p, hpow_l, hpow_u, hpow_params, hpow_ll, hpow_k, ks_hpow_stat, ks_hpow_pval),
-            'HMM (2-State)': (hmm_p, hmm_l, hmm_u, hmm_params, hmm_ll, hmm_k, ks_hmm_stat, ks_hmm_pval)
+            'Poisson Process': (pp_p, pp_l, pp_u, pp_params, pp_ll, pp_k, ks_pp_stat, ks_pp_pval, lb_pp_stat, lb_pp_pval),
+            'Inhomogeneous Poisson': (ihp_p, ihp_l, ihp_u, ihp_params, ihp_ll, ihp_k, ks_ihp_stat, ks_ihp_pval, lb_ihp_stat, lb_ihp_pval),
+            'Discrete AR(7)': (ar_p, ar_l, ar_u, ar_params, ar_ll, ar_k, ks_ar_stat, ks_ar_pval, lb_ar_stat, lb_ar_pval),
+            'INAR(1)': (inar_p, inar_l, inar_u, inar_params, inar_ll, inar_k, ks_inar_stat, ks_inar_pval, lb_inar_stat, lb_inar_pval),
+            'Hawkes (Pois Exp)': (hp_p, hp_l, hp_u, hp_params, hp_ll, hp_k, ks_hp_stat, ks_hp_pval, lb_hp_stat, lb_hp_pval),
+            'Hawkes (NB Exp)': (hnb_p, hnb_l, hnb_u, hnb_params, hnb_ll, hnb_k, ks_hnb_stat, ks_hnb_pval, lb_hnb_stat, lb_hnb_pval),
+            'Hawkes (NB Pow)': (hpow_p, hpow_l, hpow_u, hpow_params, hpow_ll, hpow_k, ks_hpow_stat, ks_hpow_pval, lb_hpow_stat, lb_hpow_pval),
+            'HMM (2-State)': (hmm_p, hmm_l, hmm_u, hmm_params, hmm_ll, hmm_k, ks_hmm_stat, ks_hmm_pval, lb_hmm_stat, lb_hmm_pval)
         }
-        # 3. Calculate metrics and build DataFrame
+        
         results = []
-        for name, (preds, lower, upper, params, ll, k, ks_stat, p_val) in models.items():
-            aic, bic = calc_ic(ll, k, n)
+        for name, (preds, lower, upper, params, ll, k, ks_stat, p_val, lb_stat, lb_pval) in models.items():
+            aic, bic = calc_ic(ll, k, n)  # Assumes calc_ic exists in your code
+
+            # Unpack the dict, cast to standard float, and join into a clean string
+            clean_params = ", ".join([f"{key}: {float(val)}" for key, val in params.items()])
+
             results.append({
                 'Model': name,
                 'BIC': round(bic, 1),
-                'MASE': round(calc_mase(ts, preds), 2),
-                'MDA': f"{calc_mda(ts, preds)*100:.1f}%",
+                'MASE': round(calc_mase(ts, preds), 2),  
+                'MDA': f"{calc_mda(ts, preds)*100:.1f}%", 
                 'K-S Stat': round(ks_stat, 3),
                 'K-S p-value': f"{p_val:.3e}",
-                'Parameters': str(params)
+                'Ljung-Box Stat': round(lb_stat, 3),
+                'Ljung-Box p-value': f"{lb_pval:.3e}",
+                'Parameters': clean_params
             })
 
-        
-            
+        # Display the leaderboard! Because they all use discrete log-likelihoods, 
+        # BIC is now a 100% fair mathematical comparison across all 8 models.
         print(pd.DataFrame(results).to_string(index=False))
         
-        # --- 1. ORIGINAL COMBINED PLOT (No Uncertainty) ---
+        # ==========================================
+        # 4. Plotting Generation
+        # ==========================================
+        # --- ORIGINAL COMBINED PLOT (No Uncertainty) ---
         plt.figure(figsize=(15, 6))
-        plt.plot(full_dates, ts, label='Actual News', color='black', alpha=0.4, linewidth=3)
+        plt.plot(full_dates, ts, label='News', color='black', alpha=0.4, linewidth=3)
+        plt.plot(full_dates, pp_p, label='Poisson', color='gray', linestyle='--', alpha=0.8) 
+        plt.plot(full_dates, ihp_p, label='Inhom. Poisson', color='brown', linestyle=':', alpha=0.8)  
         plt.plot(full_dates, ar_p, label='AR(7)', color='orange', linestyle='-', alpha=0.8)
-        plt.plot(full_dates, pp_p, label='Poisson Process', color='gray', linestyle='--', alpha=0.8) # NEW
-        plt.plot(full_dates, ihp_p, label='Inhomogeneous Poisson', color='brown', linestyle=':', alpha=0.8) # NEW   
-        plt.plot(full_dates, hp_p, label='Hawkes (Poisson)', color='green', linestyle='-.', alpha=0.8)
-        plt.plot(full_dates, hnb_p, label='Hawkes (Negative Binomial)', color='red', linestyle='--', alpha=0.9)
-        plt.plot(full_dates, hpow_p, label='Hawkes (NB Power Law)', color='purple', linestyle='-.', alpha=0.9) # NEW
-        plt.plot(full_dates, hmm_p, label='HMM (2-State)', color='blue', linestyle=':', alpha=0.9)
+        plt.plot(full_dates, inar_p, label='INAR(1)', color='teal', linestyle='-', alpha=0.8)
+        plt.plot(full_dates, hp_p, label='Hawkes (Pois)', color='green', linestyle='-.', alpha=0.8)
+        plt.plot(full_dates, hnb_p, label='Hawkes (NB)', color='red', linestyle='--', alpha=0.9)
+        plt.plot(full_dates, hpow_p, label='Hawkes (NB-Pow)', color='purple', linestyle='-.', alpha=0.9) 
+        plt.plot(full_dates, hmm_p, label='HMM (2)', color='blue', linestyle=':', alpha=0.9)
         
         plt.title(f'News Volume Modeling: {country} (2024)')
         plt.xlabel('Date')
         plt.ylabel('Daily Articles')
-        plt.legend(loc='upper right')
+        plt.legend(loc='best') # Moved legend slightly outside to prevent overlap
         plt.grid(alpha=0.3)
         plt.tight_layout()
         
@@ -441,14 +649,15 @@ if __name__ == "__main__":
         plt.savefig(filename_main, dpi=300, bbox_inches='tight')
         plt.close()
         
-        # --- 2. NEW UNCERTAINTY QUANTIFICATION GRID PLOT ---
-        fig, axes = plt.subplots(4, 2, figsize=(16, 15), sharex=True, sharey=True) # Changed to 4x2 and increased height
+        # --- UNCERTAINTY QUANTIFICATION GRID PLOT ---
+        fig, axes = plt.subplots(4, 2, figsize=(16, 15), sharex=True, sharey=True) 
         fig.suptitle(f'Uncertainty Quantification (95% CI): {country} (2024)', fontsize=16)
         axes = axes.flatten()
         
-        colors = ['orange', 'gray', 'brown', 'green', 'red', 'purple', 'blue'] # Added colors
+        # Ensure 8 colors for the 8 models
+        colors = ['gray', 'brown', 'orange', 'teal', 'green', 'red', 'purple', 'blue'] 
         
-        for i, (name, (preds, lower, upper, params, ll, k, ks_stat, p_val)) in enumerate(models.items()):
+        for i, (name, (preds, lower, upper, params, ll, k, ks_stat, p_val, lb_stat, lb_pval)) in enumerate(models.items()):
             ax = axes[i]
             # Plot Actuals
             ax.plot(full_dates, ts, color='black', alpha=0.3, label='Actual Data')
@@ -460,8 +669,10 @@ if __name__ == "__main__":
             ax.set_title(name, fontsize=12, fontweight='bold')
             ax.grid(alpha=0.3)
             ax.legend(loc='upper right', fontsize=9)
-            if i >= 2: ax.set_xlabel('Date')
-            if i % 2 == 0: ax.set_ylabel('Daily Articles')
+            
+            # Formatting logic for a 4x2 grid
+            if i >= 6: ax.set_xlabel('Date') # Only print 'Date' on the bottom 2 subplots
+            if i % 2 == 0: ax.set_ylabel('Daily Articles') # Only print 'Y' on the left side
             
         plt.tight_layout()
         filename_uq = os.path.join(output_dir, f"{country}_uq_grid_2024.png")
@@ -473,7 +684,7 @@ if __name__ == "__main__":
 
 
         
-        # Extract and print the actual Catalyst anomalies!
+        '''# Extract and print the actual Catalyst anomalies!
         hnb_preds, hnb_params = hnb_p, hnb_params
         catalysts_df = extract_hawkes_catalysts(full_dates, ts, hnb_preds, hnb_params['mu'], top_n=5)
         print(f"\n--- TOP 5 PATIENT ZERO CATALYSTS (Mainshocks) FOR {country} ---")
@@ -505,4 +716,4 @@ if __name__ == "__main__":
         plt.savefig(filename_cat, dpi=300); plt.close()
 
         print(f"\n--> Saved Catalyst plot to {filename_cat}")
-        print(f"--> Saved UQ grid plot to {filename_uq}")
+        print(f"--> Saved UQ grid plot to {filename_uq}")'''
