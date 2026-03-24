@@ -157,66 +157,126 @@ def fit_discrete_ar(ts, lags=1, likelihood='poisson'):
         
     return intensity, lower, upper, params, -res.fun, k
 
-def fit_hawkes(ts, decay=0.8, likelihood='poisson'):
-    def obj_func(params, counts, decay, likelihood):
-        if likelihood == 'poisson':
-            mu, alpha = params
-        else:
-            mu, alpha, r = params
-            if r <= 1e-5: return 1e9 
-            
-        if mu <= 1e-5 or alpha <= 1e-5 or alpha >= 0.99: 
+import numpy as np
+from scipy.optimize import minimize
+from scipy.special import gammaln
+from scipy.stats import poisson, nbinom
+
+import numpy as np
+from scipy.optimize import minimize
+from scipy.special import gammaln
+from scipy.stats import poisson, nbinom
+
+def fit_hawkes(ts, kernel='exponential', likelihood='poisson', decay=0.8):
+    def obj_func(params, counts, decay, kernel, likelihood):
+        # 1. Unpack parameters based on the chosen models
+        if kernel == 'exponential':
+            if likelihood == 'poisson':
+                mu, alpha = params
+            else:
+                mu, alpha, r = params
+                if r <= 1e-5: return 1e9 
+        elif kernel == 'power_law':
+            if likelihood == 'poisson':
+                mu, alpha, p = params
+            else:
+                mu, alpha, r, p = params
+                if r <= 1e-5: return 1e9 
+                
+        # Basic bounds check to prevent math errors
+        if mu <= 1e-5 or alpha <= 1e-5: 
             return 1e9 
         
         n = len(counts)
         intensity = np.zeros(n)
-        intensity[0] = mu
-        log_lik = 0
         
-        for t in range(1, n):
-            intensity[t] = mu + intensity[t-1] * np.exp(-decay) + alpha * counts[t-1]
-            if likelihood == 'poisson':
-                log_lik += counts[t] * np.log(intensity[t] + 1e-10) - intensity[t] - gammaln(counts[t] + 1)
-            else:
-                term1 = gammaln(counts[t] + r) - gammaln(r) - gammaln(counts[t] + 1)
-                term2 = r * np.log(r + 1e-10) - r * np.log(r + intensity[t] + 1e-10)
-                term3 = counts[t] * np.log(intensity[t] + 1e-10) - counts[t] * np.log(r + intensity[t] + 1e-10)
-                log_lik += term1 + term2 + term3
+        # 2. Calculate the Excitation/History based on the kernel
+        if kernel == 'exponential':
+            excitation = np.zeros(n)
+            for t in range(1, n):
+                excitation[t] = excitation[t-1] * np.exp(-decay) + alpha * counts[t-1]
+            intensity = mu + excitation
+            
+        elif kernel == 'power_law':
+            # Create the heavy tail decay array: alpha / (1 + lag)^p
+            lags = np.arange(1, n)
+            kernel_decay = alpha / (1.0 + lags)**p
+            
+            # Pad with 0 at the start (events today don't affect today's intensity)
+            kernel_full = np.concatenate(([0.0], kernel_decay))
+            
+            # Slide the decay array across the event counts to get history instantly
+            excitation = np.convolve(counts, kernel_full)[:n]
+            intensity = mu + excitation
+            
+        # 3. Calculate the Log-Likelihood based on the distribution
+        if likelihood == 'poisson':
+            log_lik = np.sum(counts * np.log(intensity + 1e-10) - intensity - gammaln(counts + 1))
+        else:
+            term1 = gammaln(counts + r) - gammaln(r) - gammaln(counts + 1)
+            term2 = r * np.log(r + 1e-10) - r * np.log(r + intensity + 1e-10)
+            term3 = counts * np.log(intensity + 1e-10) - counts * np.log(r + intensity + 1e-10)
+            log_lik = np.sum(term1 + term2 + term3)
+            
         return -log_lik
 
+    # --- Setup Optimization ---
     x0 = [np.mean(ts), 0.1]
     bounds = [(1e-2, None), (1e-5, 0.99)]
-    if likelihood == 'neg_binomial':
-        x0.append(1.0)
-        bounds.append((1e-2, None))
-
-    res = minimize(obj_func, x0=x0, args=(ts, decay, likelihood), bounds=bounds, method='L-BFGS-B')
     
-    if likelihood == 'poisson':
-        mu, alpha = res.x
-        params = {'mu': round(mu, 2), 'alpha': round(alpha, 3)}
-        k = 2
-    else:
-        mu, alpha, r = res.x
-        params = {'mu': round(mu, 2), 'alpha': round(alpha, 3), 'r': round(r, 2)}
-        k = 3
+    if likelihood == 'neg_binomial':
+        x0.append(1.0)      # Initial guess for r
+        bounds.append((1e-2, None))
         
-    intensity = np.zeros(len(ts))
-    intensity[0] = mu
-    for t in range(1, len(ts)):
-         intensity[t] = mu + intensity[t-1] * np.exp(-decay) + alpha * ts[t-1]
+    if kernel == 'power_law':
+        x0.append(1.5)      # Initial guess for p
+        bounds.append((1.01, 10.0)) # p > 1 ensures the tail eventually decays
+
+    res = minimize(obj_func, x0=x0, args=(ts, decay, kernel, likelihood), bounds=bounds, method='L-BFGS-B')
+    
+    # --- Format Outputs ---
+    params = {}
+    if kernel == 'exponential':
+        if likelihood == 'poisson':
+            mu, alpha = res.x
+            params = {'mu': round(mu, 2), 'alpha': round(alpha, 3)}
+        else:
+            mu, alpha, r = res.x
+            params = {'mu': round(mu, 2), 'alpha': round(alpha, 3), 'r': round(r, 2)}
+    elif kernel == 'power_law':
+        if likelihood == 'poisson':
+            mu, alpha, p = res.x
+            params = {'mu': round(mu, 2), 'alpha': round(alpha, 3), 'p': round(p, 2)}
+        else:
+            mu, alpha, r, p = res.x
+            params = {'mu': round(mu, 2), 'alpha': round(alpha, 3), 'r': round(r, 2), 'p': round(p, 2)}
             
-    # Calculate 95% Confidence Intervals based on the chosen distribution
+    k_params = len(res.x) # Number of estimated parameters for BIC/AIC later
+    
+    # Rebuild final intensity array
+    n = len(ts)
+    if kernel == 'exponential':
+        excitation = np.zeros(n)
+        for t in range(1, n):
+            excitation[t] = excitation[t-1] * np.exp(-decay) + alpha * ts[t-1]
+        intensity = mu + excitation
+    elif kernel == 'power_law':
+        lags = np.arange(1, n)
+        kernel_decay = alpha / (1.0 + lags)**p
+        kernel_full = np.concatenate(([0.0], kernel_decay))
+        excitation = np.convolve(ts, kernel_full)[:n]
+        intensity = mu + excitation
+
+    # Calculate 95% Confidence Intervals
     if likelihood == 'poisson':
         lower = poisson.ppf(0.025, intensity)
         upper = poisson.ppf(0.975, intensity)
     else:
-        # SciPy's nbinom parameterization: n = r, p = r / (r + mean)
-        p = r / (r + intensity)
-        lower = nbinom.ppf(0.025, r, p)
-        upper = nbinom.ppf(0.975, r, p)
+        prob = r / (r + intensity)
+        lower = nbinom.ppf(0.025, r, prob)
+        upper = nbinom.ppf(0.975, r, prob)
             
-    return intensity, lower, upper, params, -res.fun, k
+    return intensity, lower, upper, params, -res.fun, k_params
 
 def fit_hmm(ts, n_components=2):
     X = ts.reshape(-1, 1)
@@ -299,7 +359,7 @@ def fit_inhomogeneous_poisson(ts):
     
     return intensity, lower, upper, params, -res.fun, 4 # 4 parameters
 
-def fit_hawkes_powerlaw(ts, likelihood='neg_binomial'):
+'''def fit_hawkes_powerlaw(ts, likelihood='neg_binomial'):
     """
     Fits a Hawkes Process with a Power Law decay kernel.
     Assumption: Events have 'long memory' and decay following alpha / lag^p.
@@ -352,7 +412,7 @@ def fit_hawkes_powerlaw(ts, likelihood='neg_binomial'):
     lower = nbinom.ppf(0.025, r, p_prob)
     upper = nbinom.ppf(0.975, r, p_prob)
     
-    return intensity, lower, upper, params, -res.fun, 4
+    return intensity, lower, upper, params, -res.fun, 4'''
 
 def fit_inar(ts, lags=1):
     """
@@ -451,7 +511,7 @@ def evaluate_discrete_residuals(actual, predicted_means, model_name, country_nam
     
     residuals = np.zeros(n)
     u_vals = np.zeros(n) # NEW: We need to store the uniform variables for the PIT plot
-    np.random.seed(42) 
+    # np.random.seed(42) 
     
     for t in range(n):
         y = y_act[t]
@@ -571,7 +631,7 @@ if __name__ == "__main__":
         
         hp_p, hp_l, hp_u, hp_params, hp_ll, hp_k = fit_hawkes(ts, decay=0.8, likelihood='poisson')
         hnb_p, hnb_l, hnb_u, hnb_params, hnb_ll, hnb_k = fit_hawkes(ts, decay=0.8, likelihood='neg_binomial')
-        hpow_p, hpow_l, hpow_u, hpow_params, hpow_ll, hpow_k = fit_hawkes_powerlaw(ts, likelihood='neg_binomial') 
+        hpow_p, hpow_l, hpow_u, hpow_params, hpow_ll, hpow_k = fit_hawkes(ts, likelihood='neg_binomial', kernel='power_law') 
         hmm_p, hmm_l, hmm_u, hmm_params, hmm_ll, hmm_k = fit_hmm(ts, n_components=2)
         
         # ==========================================
