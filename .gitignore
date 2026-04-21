@@ -183,3 +183,9 @@ cython_debug/
 
 data/
 private/
+model_plots/
+*.csv
+*.xlsx
+*.png
+.png
+
