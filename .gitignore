@@ -188,4 +188,8 @@ model_plots/
 *.xlsx
 *.png
 .png
-
+*.pkl
+*.txt
+gdelt/
+gdelt
+*ipynb
