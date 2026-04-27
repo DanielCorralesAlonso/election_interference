@@ -181,15 +181,15 @@ cython_debug/
 .cursorindexingignore
 
 
-data/
+data/information_operations
+data/interference
+data/kaggle
 private/
-model_plots/
 *.csv
 *.xlsx
 *.png
 .png
 *.pkl
 *.txt
-gdelt/
-gdelt
 *ipynb
+
