@@ -71,6 +71,9 @@ if __name__ == "__main__":
     min_cf = 5
     tw = tp.TermWeight.IDF
 
+    seed_weight = 10.0
+    regular_weight = 0.001
+
 
     model = tp.LDAModel(
                 k=k, 
@@ -89,7 +92,7 @@ if __name__ == "__main__":
     topic_name_to_id = {name: i for i, name in enumerate(seed_lexicon.keys())}
     topic_id_to_name = {i: name for name, i in topic_name_to_id.items()}
 
-    model = set_seeded_prior(model, seed_lexicon, topic_name_to_id=topic_name_to_id, seed_weight=4.0, regular_weight=0.001)
+    model = set_seeded_prior(model, seed_lexicon, topic_name_to_id=topic_name_to_id, seed_weight=seed_weight, regular_weight=regular_weight)
 
     total_iterations = 8000
     burn_in = 7000           # Wait until the model has converged to start sampling
@@ -167,5 +170,5 @@ if __name__ == "__main__":
 
     topic_stability_analysis = True
     if topic_stability_analysis:
-        run_topic_stability_pipeline(final_chunked_documents, n_models=10, k=k, top_n=50, model_kwargs={"alpha": alpha, "eta": eta, "min_cf": min_cf, "tw": tw}, seeds=None, output_dir="output", reference_model=model, reference_name=country_name, seeded_topic_names=topic_id_to_name)
+        run_topic_stability_pipeline(final_chunked_documents, n_models=10, k=k, top_n=100, model_kwargs={"alpha": alpha, "eta": eta, "min_cf": min_cf, "tw": tw}, seeds=None, output_dir="output", reference_model=model, reference_name=country_name, seeded_topic_names=topic_id_to_name)
 

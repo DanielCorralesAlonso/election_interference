@@ -38,6 +38,18 @@ def plot_topic_evolution(
             "without resetting its index, or train a separate model for that country."
         )
 
+    def topic_label(k_id):
+        if k_id in topic_id_to_name:
+            return topic_id_to_name[k_id]
+        try:
+            top_words = mdl.get_topic_words(k_id, top_n=3)
+            words = [w for w, _ in top_words]
+            if words:
+                return " / ".join(words)
+        except Exception:
+            pass
+        return f"Topic_{k_id}"
+
     # Loop through every document in the tomotopy model
     for idx, doc in enumerate(mdl.docs):
         # Get the mathematical distribution across all topics for this specific chunk
@@ -85,12 +97,12 @@ def plot_topic_evolution(
 
     topic_cols = [col for col in df_final.columns if col.startswith('Topic_')]
 
-    # Group the data by Week ('W') and calculate the mean topic probability for that week
-    weekly_trends = df_final[topic_cols].resample('W').mean()
+    # Group by day and compute mean topic probability for each day.
+    # Fill missing days with zeros so plots remain continuous when no articles were published.
+    daily_trends = df_final[topic_cols].resample('D').mean().fillna(0)
 
-    # Apply a 1-week rolling average to smooth out the jagged spikes
-    # min_periods=1 ensures the graph doesn't drop the first two weeks
-    smoothed_trends = weekly_trends.rolling(window=1, min_periods=1).mean()
+    # Smooth with a 7-day rolling window so spikes are still day-resolved.
+    smoothed_trends = daily_trends.rolling(window=7, min_periods=1).mean()
 
     # ==========================================
     # 3.5 SPIKE DETECTION & EXPORT
@@ -117,32 +129,28 @@ def plot_topic_evolution(
             if col not in smoothed_trends.columns:
                 continue
 
-            fh.write(f"Topic {k_id} - {topic_id_to_name.get(k_id, str(k_id))}\n")
+            fh.write(f"Topic {k_id} - {topic_label(k_id)}\n")
             fh.write('-' * 60 + "\n")
 
-            # get the top TOP_K weekly spike dates and their magnitudes
+            # Get the top TOP_K day-level spike dates and their magnitudes.
             top_spikes = smoothed_trends[col].nlargest(TOP_K)
             if top_spikes.empty:
                 fh.write("No spikes found.\n\n")
                 continue
 
             for spike_dt, spike_val in top_spikes.items():
-                # define week window: last 7 days up to spike_dt
-                week_start = spike_dt - pd.Timedelta(days=6)
-                week_end = spike_dt
+                fh.write(f"Spike day {spike_dt.date()} (7-day smoothed value={spike_val * 100:.1f}%)\n")
 
-                fh.write(f"Spike week ending {spike_dt.date()} (value={spike_val:.4f})\n")
-
-                # articles in that week
-                week_articles = df_articles[(df_articles['Event_Date'] >= week_start) & (df_articles['Event_Date'] <= week_end)]
-                if week_articles.empty:
-                    fh.write("  No articles in this week.\n\n")
+                # Articles for the exact spike day.
+                day_articles = df_articles[df_articles['Event_Date'].dt.date == spike_dt.date()]
+                if day_articles.empty:
+                    fh.write("  No articles on this day.\n\n")
                     continue
 
-                # find articles in that week where this topic has non-trivial mass
-                matched = week_articles[week_articles[col] > THRESHOLD].copy()
+                # Find articles for this day where this topic has non-trivial mass.
+                matched = day_articles[day_articles[col] > THRESHOLD].copy()
                 if matched.empty:
-                    fh.write("  No articles with topic prob > {THRESHOLD} in this week.\n\n")
+                    fh.write(f"  No articles with topic prob > {THRESHOLD:.2f} on this day.\n\n")
                     continue
 
                 # For each matched article, write metadata, topic distribution (>THRESHOLD), and the raw text
@@ -150,8 +158,12 @@ def plot_topic_evolution(
                     orig_idx = int(row['Original_Index'])
                     event_date = row['Event_Date']
 
-                    # collect topic probs > THRESHOLD
-                    topic_probs = {t: float(row[t]) for t in topic_cols if (t in row.index and row[t] > THRESHOLD)}
+                    # Collect topic probabilities above threshold with seeded topic names.
+                    topic_probs = {
+                        topic_label(int(t.split('_')[1])): f"{row[t] * 100:.1f}%"
+                        for t in topic_cols
+                        if (t in row.index and row[t] > THRESHOLD)
+                    }
 
                     # try to get the original text from df_w_texts (should preserve original indices)
                     full_text = None
