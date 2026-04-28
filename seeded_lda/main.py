@@ -13,7 +13,6 @@ from set_seeded_prior import set_seeded_prior
 from utils import print_topic_overview, print_document_topics, print_corpus_topic_distribution
 from plot import plot_topic_evolution
 from topic_stability_analysis import run_topic_stability_pipeline
-from topic_stability_analysis import run_topic_stability_pipeline
 
 if __name__ == "__main__":
 
@@ -69,7 +68,7 @@ if __name__ == "__main__":
     k = 100
     alpha = 0.2
     eta = 0.001
-    min_cf = 3
+    min_cf = 5
     tw = tp.TermWeight.IDF
 
 
@@ -151,6 +150,22 @@ if __name__ == "__main__":
 
     plot_topic_evolution(model, df_chunked=chunked_df, df_w_texts=df_w_texts, topic_id_to_name=topic_id_to_name, output_dir="output", country_name=country_name)
 
-    topic_stability_analysis = False
+    if country_name == "all":
+        # Plot topic evolution for each country separately after the full corpus plot.
+        for country in df_w_texts['Country'].unique():
+            print(f"\nGenerating topic evolution plot for {country}...")
+            country_df = df_w_texts[df_w_texts['Country'] == country]
+            plot_topic_evolution(
+                model,
+                df_chunked=chunked_df,
+                df_w_texts=country_df,
+                topic_id_to_name=topic_id_to_name,
+                output_dir="output",
+                country_name=f"all_{country}",
+            )
+
+
+    topic_stability_analysis = True
     if topic_stability_analysis:
-        run_topic_stability_pipeline(final_chunked_documents, n_models=5, k=k, top_n=15, model_kwargs={"alpha": alpha, "eta": eta, "min_cf": min_cf, "tw": tw}, seeds=None, output_dir="output", reference_model=model, reference_name=country_name, seeded_topic_names=topic_id_to_name)
+        run_topic_stability_pipeline(final_chunked_documents, n_models=10, k=k, top_n=50, model_kwargs={"alpha": alpha, "eta": eta, "min_cf": min_cf, "tw": tw}, seeds=None, output_dir="output", reference_model=model, reference_name=country_name, seeded_topic_names=topic_id_to_name)
+

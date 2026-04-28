@@ -31,17 +31,19 @@ def webscrape_articles(df, N=None, random_state=42, cache_file="gdelt/articles_w
                 text = article.text
 
                 event_date = df.loc[df['News_URL'] == url, 'Event_Date'].iloc[0]
+                country = df.loc[df['News_URL'] == url, 'Initiator_Country'].iloc[0]
                 rows.append({
                     'Event_Date': event_date,
                     'News_URL': url,
-                    'Full_Text': text
+                    'Full_Text': text,
+                    'Country': country
                 })
 
             except Exception:
                 # Keep running even if one URL fails
                 continue
 
-        df_w_texts = pd.DataFrame(rows, columns=['Event_Date', 'News_URL', 'Full_Text'])
+        df_w_texts = pd.DataFrame(rows, columns=['Event_Date', 'News_URL', 'Full_Text', 'Country'])
         print(f"Scraped {len(df_w_texts)} articles successfully.")
 
         if save_cache:
