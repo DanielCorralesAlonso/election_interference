@@ -233,3 +233,19 @@ def plot_topic_evolution(
     # Save or display the plot
     plt.savefig(os.path.join(output_dir, f"topic_evolution_{country_name}.png"), dpi=300)
     plt.close()
+
+
+
+
+
+def plot_document_length_distribution(df_w_texts, text_col, output_dir="output", country_name="", title="Document Length Distribution"):
+    plt.figure(figsize=(10, 6))
+    df_w_texts['Doc_Length'] = df_w_texts[text_col].apply(len)
+    plt.hist(df_w_texts['Doc_Length'], bins=30, color='skyblue', edgecolor='black')
+    plt.title(f"{title} - {country_name}", fontsize=16)
+    plt.xlabel("Number of Tokens", fontsize=12)
+    plt.ylabel("Number of Articles", fontsize=12)
+    plt.grid(axis='y', alpha=0.75)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, f"doc_length_distribution_{country_name}.png"), dpi=300)
+    plt.close()
