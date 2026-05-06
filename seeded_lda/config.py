@@ -49,7 +49,7 @@ custom_words_to_remove = [
     "mr", "mrs", "ms", "dr", "sir", "madam", "people", "person", "man", 
     "woman", "like", "know", "think", "look", "good", "new", "old", "way", 
     "thing", "come", "go", "take", "get", "make", "use", "want", "find",
-    "need", "work", "give", "try", "leave", "call", "lot", "bit", "get", "want", "say", "see", "look", "meet"
+    "need", "work", "give", "try", "leave", "call", "lot", "bit", "get", "want", "say", "see", "look", "meet",
 
     "dot", "com", "cn", "www", "http", "https", "href", "html"
 ]

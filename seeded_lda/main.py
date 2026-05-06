@@ -7,7 +7,7 @@ import pickle
 import numpy as np
 
 from webscrapping import webscrape_articles
-from text_preprocessing import clean_scraped_text, preprocess_texts, n_gram_pipeline, chunk_dataframe, detect_languages_in_texts, preprocess_pipeline
+from text_preprocessing import clean_scraped_text, preprocess_texts, n_gram_pipeline, chunk_dataframe, detect_languages_in_texts, preprocess_pipeline, collect_seed_term_candidates, report_seed_coverage, build_preprocessing_config
 from config import custom_words_to_remove, seed_lexicon
 from set_seeded_prior import set_seeded_prior
 from utils import print_topic_overview, print_document_topics, print_corpus_topic_distribution, print_topic_distinctive_tokens, print_topic_coherence
@@ -16,7 +16,9 @@ from topic_stability_analysis import run_topic_stability_pipeline
 
 if __name__ == "__main__":
 
-    country_name = os.sys.argv[1] if len(os.sys.argv) > 1 else "all"
+    force_preprocess = "--force-preprocess" in os.sys.argv[1:]
+    positional_args = [arg for arg in os.sys.argv[1:] if not arg.startswith("--")]
+    country_name = positional_args[0] if len(positional_args) > 0 else "all"
 
     try:
         file_name = f"data/gdelt/GDELT_Extraction_2024_{country_name}_Election_Propaganda.csv"
@@ -66,7 +68,22 @@ if __name__ == "__main__":
         df_w_texts.loc[i, 'Full_Text'] = df_w_texts.loc[i, 'Full_Text'].encode('ascii', 'ignore').decode('utf-8')
 
     # pdb.set_trace()
-    final_documents = preprocess_pipeline(df_w_texts, custom_words_to_remove=custom_words_to_remove, remove_other_languages=True, output_dir="output", country_name=country_name)
+    protected_seed_terms = collect_seed_term_candidates(seed_lexicon)
+    final_documents = preprocess_pipeline(
+        df_w_texts,
+        custom_words_to_remove=custom_words_to_remove,
+        remove_other_languages=True,
+        output_dir="output",
+        country_name=country_name,
+        force_preprocess=force_preprocess,
+        seed_lexicon=seed_lexicon,
+        min_df=2,
+        max_df_ratio=0.9,
+        bigram_min_count=15,
+        bigram_threshold=0.005,
+        protected_terms=protected_seed_terms,
+        report_path=os.path.join("output", f"preprocessing_qa_{country_name}.json"),
+    )
     df_w_texts['Processed_Tokens'] = final_documents
 
     # Plot document length distribution before chunking
@@ -75,6 +92,12 @@ if __name__ == "__main__":
     chunked_df = chunk_dataframe(df_w_texts, token_col='Processed_Tokens', text_col='Full_Text', chunk_size=2000)
     final_chunked_documents = chunked_df['Unified_Tokens'].tolist()
     plot_document_length_distribution(chunked_df, text_col='Unified_Tokens', output_dir="output", country_name=country_name, title="Document Length Distribution After Chunking")
+
+    report_seed_coverage(
+        final_chunked_documents,
+        seed_lexicon,
+        output_path=os.path.join("output", f"seed_coverage_{country_name}.json"),
+    )
 
     k = 100
     alpha = 0.2 
@@ -85,6 +108,7 @@ if __name__ == "__main__":
     seed_weight = 10.0
     regular_weight = 0.001
 
+    #pdb.set_trace()
 
     model = tp.LDAModel(
                 k=k, 
