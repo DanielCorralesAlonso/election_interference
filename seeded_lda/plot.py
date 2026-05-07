@@ -3,6 +3,18 @@ import matplotlib.dates as mdates
 import pandas as pd
 import os
 
+# Make all plots publication-ready with larger fonts
+plt.rcParams.update({
+    'font.size': 14,          # Global font size
+    'axes.titlesize': 16,     # Subplot titles
+    'axes.labelsize': 14,     # X/Y axis labels
+    'xtick.labelsize': 12,    # X tick marks
+    'ytick.labelsize': 12,    # Y tick marks
+    'legend.fontsize': 12,    # Legend text
+    'figure.titlesize': 18    # Main overarching title
+})
+
+
 
 def plot_topic_evolution(
     mdl,
@@ -248,4 +260,156 @@ def plot_document_length_distribution(df_w_texts, text_col, output_dir="output",
     plt.grid(axis='y', alpha=0.75)
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, f"doc_length_distribution_{country_name}.png"), dpi=300)
+
+def plot_topic_evolution_comparison(
+    mdl,
+    df_chunked,
+    df_w_texts,
+    topic_id_to_name,
+    output_dir="output",
+    countries=("Russia", "China", "Iran"),
+    topics_to_plot=None,
+    filename="topic_evolution_russia_china_iran.png",
+):
+    """Plot topic evolution for multiple countries in stacked panels with a shared y-axis."""
+    os.makedirs(output_dir, exist_ok=True)
+
+    country_aliases = {
+        "russia": {"russia", "ru", "rus", "russian federation", "russian fed."},
+        "china": {"china", "cn", "chn", "people's republic of china", "prc", "p.r.c."},
+        "iran": {"iran", "ir", "irn", "iran (islamic republic of)", "islamic republic of iran"},
+    }
+
+    def normalize_value(value):
+        if pd.isna(value):
+            return ""
+        return str(value).strip().lower()
+
+    def country_matches(series, target_country):
+        aliases = set()
+        canonical = normalize_value(target_country)
+        aliases.add(canonical)
+        aliases.update(country_aliases.get(canonical, set()))
+        normalized = series.astype(str).map(normalize_value)
+        return normalized.isin(aliases)
+
+    if topics_to_plot is None:
+        try:
+            keys = sorted(topic_id_to_name.keys())
+            topics_to_plot = keys[:3] if len(keys) >= 3 else keys
+        except Exception:
+            topics_to_plot = [0, 1, 2]
+
+    if len(mdl.docs) != len(df_chunked):
+        raise ValueError(
+            f"mdl.docs ({len(mdl.docs)}) and df_chunked ({len(df_chunked)}) must have the same length. "
+            "For country-specific plots, pass the full chunked dataframe and a filtered df_w_texts slice "
+            "without resetting its index, or train a separate model for that country."
+        )
+
+    def build_smoothed_trends(country_df):
+        chunk_data = []
+        for idx, doc in enumerate(mdl.docs):
+            dist = doc.get_topic_dist()
+            original_idx = df_chunked.iloc[idx]["Original_Index"]
+            row_data = {"Original_Index": original_idx}
+            for k_id, prob in enumerate(dist):
+                row_data[f"Topic_{k_id}"] = prob
+            chunk_data.append(row_data)
+
+        df_dists = pd.DataFrame(chunk_data)
+        df_article_topics = df_dists.groupby("Original_Index").mean().reset_index()
+
+        event_col = "Event_Date" if "Event_Date" in country_df.columns else None
+        if event_col is None:
+            return None
+
+        df_final = country_df[[event_col]].merge(
+            df_article_topics,
+            left_index=True,
+            right_on="Original_Index",
+        )
+        df_final["Event_Date"] = pd.to_datetime(df_final["Event_Date"].astype(str), errors="coerce")
+        if df_final["Event_Date"].isna().all():
+            df_final["Event_Date"] = pd.to_datetime(df_final["Event_Date"].astype(str).str.replace(r"[^0-9]", "", regex=True), format="%Y%m%d", errors="coerce")
+        df_final = df_final.dropna(subset=["Event_Date"])
+        if df_final.empty:
+            return None
+        df_final.set_index("Event_Date", inplace=True)
+
+        topic_cols = [col for col in df_final.columns if col.startswith("Topic_")]
+        daily_trends = df_final[topic_cols].resample("D").mean().fillna(0)
+        return daily_trends.rolling(window=7, min_periods=1).mean()
+
+    country_frames = []
+    if "Country" not in df_w_texts.columns:
+        print("Warning: no Country column found. Skipping comparison plot.")
+        return
+
+    for country in countries:
+        mask = country_matches(df_w_texts["Country"], country)
+        country_df = df_w_texts[mask]
+        if country_df.empty:
+            continue
+        trends = build_smoothed_trends(country_df)
+        if trends is None or trends.empty:
+            continue
+        country_frames.append((country, trends))
+
+    if not country_frames:
+        print("Warning: no matching country rows found for the comparison plot. Skipping.")
+        return
+
+    colors = ["#1f77b4", "#d62728", "#2ca02c", "#ff7f0e", "#9467bd"]
+    all_values = []
+    for _, trends in country_frames:
+        for k_id in topics_to_plot:
+            col = f"Topic_{k_id}"
+            if col in trends.columns:
+                all_values.append(trends[col] * 100)
+
+    if all_values:
+        combined = pd.concat(all_values, axis=0)
+        y_min = float(combined.min())
+        y_max = float(combined.max())
+    else:
+        y_min, y_max = 0.0, 1.0
+
+    fig, axes = plt.subplots(len(country_frames), 1, figsize=(14, 4.5 * len(country_frames)), sharex=True, sharey=True)
+    if len(country_frames) == 1:
+        axes = [axes]
+
+    for ax, (country, trends) in zip(axes, country_frames):
+        for i, k_id in enumerate(topics_to_plot):
+            col = f"Topic_{k_id}"
+            if col not in trends.columns:
+                continue
+            label = topic_id_to_name.get(k_id, f"Topic {k_id}")
+            ax.plot(
+                trends.index,
+                trends[col] * 100,
+                label=label,
+                linewidth=2.5,
+                color=colors[i % len(colors)],
+            )
+        ax.set_title(country, fontsize=13, fontweight="bold")
+        ax.set_ylabel("Topic share (%)", fontsize=11)
+        ax.grid(True, linestyle="--", alpha=0.5)
+        ax.set_ylim(y_min, y_max)
+
+    axes[-1].set_xlabel("Date", fontsize=12)
+    axes[-1].xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
+    axes[-1].xaxis.set_major_locator(mdates.MonthLocator(interval=1))
+    plt.setp(axes[-1].get_xticklabels(), rotation=45, ha="right")
+
+    handles, labels = axes[0].get_legend_handles_labels()
+    if handles:
+        fig.legend(handles, labels, title="Seeded Topics", loc="upper right", bbox_to_anchor=(0.98, 0.98))
+
+    fig.suptitle("Topic evolution comparison: Russia, China, and Iran", fontsize=16, fontweight="bold", y=0.995)
+    fig.tight_layout(rect=[0, 0, 0.92, 0.98])
+    output_path = os.path.join(output_dir, filename)
+    fig.savefig(output_path, dpi=300, bbox_inches="tight")
+    print(f"Saved comparison topic evolution plot to {output_path}")
+    plt.close(fig)
     plt.close()

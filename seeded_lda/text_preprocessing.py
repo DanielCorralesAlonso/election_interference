@@ -14,6 +14,7 @@ import pickle
 try:
     from sklearn.feature_extraction.text import TfidfVectorizer
     from sklearn.neighbors import NearestNeighbors
+    from sklearn.metrics.pairwise import cosine_similarity
     import numpy as np
 except Exception:
     # sklearn is optional for the more conservative deduplication method
@@ -193,7 +194,7 @@ def simhash_band_keys(fingerprint, num_bands=2, band_size=32):
     return [((band_index), (fingerprint >> (band_index * band_size)) & mask) for band_index in range(num_bands)]
 
 
-def remove_near_duplicates(df, text_col="Full_Text", similarity_threshold=5, min_tokens=50, num_bands=2, band_size=32, dedup_method="tfidf", tfidf_threshold=0.85):
+def remove_near_duplicates(df, text_col="Full_Text", similarity_threshold=5, min_tokens=50, num_bands=2, band_size=32, dedup_method="tfidf", tfidf_threshold=0.9):
     if df.empty:
         return df.copy(), {
             "input_documents": 0,
@@ -245,6 +246,9 @@ def remove_near_duplicates(df, text_col="Full_Text", similarity_threshold=5, min
             nbrs.fit(X)
             distances, neighbors = nbrs.radius_neighbors(X, return_distance=True)
 
+            # map dataframe index -> position in eligible list for quick lookup
+            idx_to_pos = {int(df_idx): pos for pos, df_idx in enumerate(eligible_idxs)}
+
             # union-find to build connected components of similar docs
             n = len(eligible_idxs)
             parent = list(range(n))
@@ -282,22 +286,55 @@ def remove_near_duplicates(df, text_col="Full_Text", similarity_threshold=5, min
                 if len(comp_df_idxs) > 1:
                     # add sample for QA
                     rep_text = df.iloc[rep_df_idx][text_col][:250]
-                    other_idx = comp_df_idxs[0] if comp_df_idxs[0] != rep_df_idx else comp_df_idxs[1]
-                    other_text = df.iloc[other_idx][text_col][:250]
-                    near_examples.append({
-                        "type": "near",
-                        "distance": None,
-                        "representative_text": rep_text,
-                        "duplicate_text": other_text,
-                    })
+                    # find corresponding positions in the TF-IDF matrix for rep and a sample other
+                    rep_pos = None
+                    for pos_in_comp, pos in enumerate(comp):
+                        if eligible_idxs[pos] == rep_df_idx:
+                            rep_pos = pos
+                            break
+                    # pick another member of the component for example
+                    other_pos = comp[0] if comp[0] != rep_pos else (comp[1] if len(comp) > 1 else None)
+                    if other_pos is not None:
+                        other_idx = eligible_idxs[other_pos]
+                        other_text = df.iloc[other_idx][text_col][:250]
+                        # compute cosine similarity between TF-IDF vectors
+                        sim_val = None
+                        try:
+                            sim_val = float(cosine_similarity(X[rep_pos], X[other_pos])[0, 0])
+                        except Exception:
+                            try:
+                                sim_val = float((X[rep_pos].dot(X[other_pos].T).toarray())[0][0])
+                            except Exception:
+                                sim_val = None
+                        near_examples.append({
+                            "type": "near",
+                            "similarity": sim_val,
+                            "distance": (1.0 - sim_val) if sim_val is not None else None,
+                            "representative_text": rep_text,
+                            "duplicate_text": other_text,
+                        })
                 for idx in comp_df_idxs:
                     if idx == rep_df_idx:
                         continue
+                    # record similarity for QA when possible
+                    try:
+                        idx_pos = idx_to_pos.get(idx, None)
+                        if rep_pos is not None and idx_pos is not None:
+                            try:
+                                sim_val_rec = float(cosine_similarity(X[rep_pos], X[idx_pos])[0, 0])
+                            except Exception:
+                                sim_val_rec = float((X[rep_pos].dot(X[idx_pos].T).toarray())[0][0])
+                        else:
+                            sim_val_rec = None
+                    except Exception:
+                        sim_val_rec = None
                     duplicate_records.append({
                         "duplicate_index": int(idx),
                         "representative_index": int(rep_df_idx),
                         "reason": "near",
                         "hamming_distance": None,
+                        "similarity": sim_val_rec,
+                        "distance": (1.0 - sim_val_rec) if sim_val_rec is not None else None,
                     })
 
             # assemble deduplicated dataframe keeping order of first occurrence

@@ -1,14 +1,14 @@
 seed_lexicon = {
-    "propaganda": ["propaganda", "disinformation", "misinformation", "spread_lie", "fake_news", "influence_operation", "influence", "influence_campaign", "spread_propaganda", "misinform", "disinform", "manipulate", "manipulated", "manipulation", "fake_account", "disinformation_campaign"],
-    "election_interference": ["election_interference", "foreign_interference", 'interference', "election_meddling", "vote_manipulation", "ballot_interference", "influence_election", "influence_elections", "election_influence"],
-    "hacking": ["hack", "hacking", "cyber_attack", "cyberattack", "hacker", "fake_site", "data_breach", "malware", "phishing", "ransomware",],
-    "social_media": ["social_media", "app", "social_network", "social_medium", "facebook", "twitter", "instagram", "tiktok", "reddit", "youtube", "internet", "whatsapp", "telegram", "telegram_channel","social_platform"],
-    "artificial_intelligence": ["artificial_intelligence", "ai", "gen_ai", "ai_generate", "ai_generation", "ai_bot", "ai_bots", "generative_ai", "chatbots", "ai_trolls", "ai_based", "a.i."],
-    "security": ["threat", "security", "security_concern", "cybersecurity", "vulnerability", "risk", "defense", "countermeasure", "mitigation", "national_security", "u.s._intelligence"],
-    "us_elections": ["us_elections", "u.s._elections", "presidential_election", "nov._election", "u.s._midterm", "donald_trump", "joe_biden", "gop", "kamala_harris", "democrats", "republicans", "democratic_party", "republican_party", "midterm_elections", "presidential_elections", "election_security"],
+    "propaganda": ["propaganda", "disinformation", "misinformation", "spread_lie", "influence_operation", "influence", "influence_campaign", "spread_propaganda", "misinform", "disinformation_campaign"],
+    "election_interference": ["election_interference", "foreign_interference", 'interference', "election_meddling", "vote_manipulation", "influence_election", "influence_elections", "election_influence"],
+    "hacking": ["hack", "hacking", "cyber_attack", "cyberattack", "hacker", "malware", "ransomware","phising", "spyware", "breach"],
+    "social_media": ["social_media", "app", "social_network", "facebook", "twitter", "instagram", "tiktok", "reddit", "youtube", "internet", "whatsapp", "telegram", "telegram_channel","social_platform"],
+    "artificial_intelligence": ["artificial_intelligence", "ai", "ai_generate", "ai_bot", "generative_ai", "chatbot", "large_language_model", "deepfake"],
+    "security": ["security_threat", "security", "security_concern", "cybersecurity",  "national_security", "homeland_security", ],
+    "us_elections": [ "presidential_election", "donald_trump", "trump", "biden", "harris", "democrats", "republicans", "democratic_party", "republican_party", "midterm_election", "presidential_elections", "election_security"],
     "russia": ["russia", "putin", "kremlin", "moscow", "ira", "internet_research_agency", "russian_government", "russian_military", "russian"],
     "china": ["china", "chinese","xi_jinping", "beijing", "chinese_government", "chinese_military", "ccp", "chinese_communist"],
-    "iran": ["iran", "irarian", "rouhani", "tehran", "iranian_government", "iranian_military", "ayatollah", "iranian_revolutionary_guard"],
+    "iran": ["iran", "iranian", "rouhani", "tehran", "iranian_government", "iranian_military", "ayatollah", "iranian_revolutionary_guard"],
 }
 
 

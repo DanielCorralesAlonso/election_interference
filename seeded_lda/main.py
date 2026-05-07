@@ -11,8 +11,11 @@ from text_preprocessing import clean_scraped_text, preprocess_texts, n_gram_pipe
 from config import custom_words_to_remove, seed_lexicon
 from set_seeded_prior import set_seeded_prior
 from utils import print_topic_overview, print_document_topics, print_corpus_topic_distribution, print_topic_distinctive_tokens, print_topic_coherence
-from plot import plot_topic_evolution, plot_document_length_distribution
+from plot import plot_topic_evolution, plot_topic_evolution_comparison, plot_document_length_distribution
+from hawkes_analysis import run_hawkes_news_analysis
 from topic_stability_analysis import run_topic_stability_pipeline
+
+
 
 if __name__ == "__main__":
 
@@ -33,6 +36,23 @@ if __name__ == "__main__":
     df.drop_duplicates(inplace=True)
     print(f"Loaded {len(df)} unique articles for country: {country_name}\n")
 
+    '''try:
+        hawkes_summary = run_hawkes_news_analysis(
+            df,
+            output_dir="output",
+            country_name=country_name,
+            countries=("RUS", "CHN", "IRN"),
+        )
+        print(
+            f"Hawkes analysis completed for {len(hawkes_summary.get('countries', {}))} country/countries. "
+            f"Summary saved to output/hawkes_news_summary_{country_name}.json\n"
+        )
+    except Exception as e:
+        print(f"Warning: Hawkes analysis skipped due to error: {e}\n")
+'''
+    
+    pdb.set_trace()
+    
     df_w_texts = webscrape_articles(
                     df, 
                     N=len(df), 
@@ -69,7 +89,7 @@ if __name__ == "__main__":
 
     # pdb.set_trace()
     protected_seed_terms = collect_seed_term_candidates(seed_lexicon)
-    final_documents = preprocess_pipeline(
+    preprocessing_result = preprocess_pipeline(
         df_w_texts,
         custom_words_to_remove=custom_words_to_remove,
         remove_other_languages=True,
@@ -84,6 +104,26 @@ if __name__ == "__main__":
         protected_terms=protected_seed_terms,
         report_path=os.path.join("output", f"preprocessing_qa_{country_name}.json"),
     )
+
+    # Canonical contract: preprocess_pipeline should return one list aligned to df_w_texts.
+    # Some legacy variants return a tuple; keep only the document list and never overwrite df_w_texts here.
+    if isinstance(preprocessing_result, tuple):
+        print("Warning: legacy tuple returned by preprocess_pipeline; using only the documents component.")
+        final_documents = preprocessing_result[0]
+    else:
+        final_documents = preprocessing_result
+
+    if not isinstance(final_documents, list):
+        final_documents = list(final_documents)
+
+    if len(final_documents) != len(df_w_texts):
+        raise ValueError(
+            "preprocess_pipeline output is not aligned with input dataframe: "
+            f"len(final_documents)={len(final_documents)} vs len(df_w_texts)={len(df_w_texts)}. "
+            "This indicates an inconsistent preprocessing contract or stale implementation. "
+            "Please ensure preprocess_pipeline returns exactly one document list aligned to the input rows."
+        )
+
     df_w_texts['Processed_Tokens'] = final_documents
 
     # Plot document length distribution before chunking
@@ -99,7 +139,7 @@ if __name__ == "__main__":
         output_path=os.path.join("output", f"seed_coverage_{country_name}.json"),
     )
 
-    k = 100
+    k = 150
     alpha = 0.2 
     eta = 0.001  # Will be changes to seeded prior.
     min_cf = 5
@@ -187,7 +227,7 @@ if __name__ == "__main__":
 
         # 1. Build coherence evaluator bound to the model
     coherence_measure = "c_v"
-    top_n = 10
+    top_n = 30
     coh = tp.coherence.Coherence(model, coherence=coherence_measure, top_n=top_n)
     print_topic_coherence(model, coh, topic_id_to_name, output_dir="output", country_name=country_name, coherence_measure=coherence_measure, top_n=top_n)
 
@@ -213,8 +253,17 @@ if __name__ == "__main__":
                 country_name=f"all_{country}",
             )
 
+        plot_topic_evolution_comparison(
+            model,
+            df_chunked=chunked_df,
+            df_w_texts=df_w_texts,
+            topic_id_to_name=topic_id_to_name,
+            output_dir="output",
+            countries=("Russia", "China", "Iran"),
+        )
+
 
     topic_stability_analysis = False
     if topic_stability_analysis:
-        run_topic_stability_pipeline(final_chunked_documents, n_models=10, k=k, top_n=100, model_kwargs={"alpha": alpha, "eta": eta, "min_cf": min_cf, "tw": tw}, seeds=None, output_dir="output", reference_model=model, reference_name=country_name, seeded_topic_names=topic_id_to_name)
+        run_topic_stability_pipeline(final_chunked_documents, n_models=10, k=k, top_n=200, model_kwargs={"alpha": alpha, "eta": eta, "min_cf": min_cf, "tw": tw}, seeds=None, output_dir="output", reference_model=model, reference_name=country_name, seeded_topic_names=topic_id_to_name)
 
