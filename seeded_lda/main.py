@@ -5,6 +5,7 @@ import pdb
 import os
 import pickle
 import numpy as np
+import matplotlib.pyplot as plt
 
 from webscrapping import webscrape_articles
 from text_preprocessing import clean_scraped_text, preprocess_texts, n_gram_pipeline, chunk_dataframe, detect_languages_in_texts, preprocess_pipeline, collect_seed_term_candidates, report_seed_coverage, build_preprocessing_config
@@ -16,10 +17,116 @@ from hawkes_analysis import run_hawkes_news_analysis
 from topic_stability_analysis import run_topic_stability_pipeline
 
 
+def find_best_k(documents, k_values, alpha=0.2, eta=0.001, min_cf=5,
+                tw=None, n_iterations=500, coherence_measure="c_v", top_n=10,
+                coherence_weight=0.7, output_dir="output", country_name="all"):
+    """
+    Train LDA models over a range of K values and select the best K using a
+    combined score of c_v coherence and perplexity.
+
+    Rationale:
+      - Perplexity alone always favours large K (statistical overfit).
+      - c_v coherence correlates best with human topic judgements and typically
+        peaks then plateaus, giving a genuine signal.
+      - The combined score normalises both metrics to [0,1] and weights them:
+            score = coherence_weight * norm_coherence
+                  + (1 - coherence_weight) * (1 - norm_perplexity)
+        Default coherence_weight=0.7 reflects that coherence is the more
+        reliable guide.
+
+    Returns
+    -------
+    best_k : int
+        K that maximises the combined score.
+    results : dict
+        Maps each K to {"perplexity": ..., "coherence": ..., "score": ...}.
+    """
+    if tw is None:
+        tw = tp.TermWeight.IDF
+
+    k_list = list(k_values)
+    perplexities, coherences = [], []
+
+    print(f"\nSearching for best K over {k_list} "
+          f"({n_iterations} iterations each, coherence={coherence_measure})...")
+
+    for k_val in tqdm(k_list, desc="K search"):
+        model_k = tp.LDAModel(k=k_val, alpha=alpha, eta=eta, min_cf=min_cf, tw=tw)
+        for doc in documents:
+            model_k.add_doc(doc)
+        model_k.train(n_iterations)
+
+        perp = model_k.perplexity
+        coh_eval = tp.coherence.Coherence(model_k, coherence=coherence_measure, top_n=top_n)
+        avg_coh = float(np.mean([coh_eval.get_score(topic_id=i) for i in range(model_k.k)]))
+
+        perplexities.append(perp)
+        coherences.append(avg_coh)
+        tqdm.write(f"  K={k_val:>4d}  perplexity={perp:.4f}  coherence={avg_coh:.4f}")
+
+    # --- normalise to [0, 1] ------------------------------------------------
+    perp_arr = np.array(perplexities)
+    coh_arr  = np.array(coherences)
+
+    def _norm(arr):
+        rng = arr.max() - arr.min()
+        return (arr - arr.min()) / rng if rng > 0 else np.ones_like(arr) * 0.5
+
+    norm_perp = _norm(perp_arr)   # lower raw → lower norm → better
+    norm_coh  = _norm(coh_arr)    # higher raw → higher norm → better
+
+    scores = coherence_weight * norm_coh + (1.0 - coherence_weight) * (1.0 - norm_perp)
+    best_idx = int(np.argmax(scores))
+    best_k   = k_list[best_idx]
+
+    # secondary diagnostics
+    best_k_perp = k_list[int(np.argmin(perp_arr))]
+    best_k_coh  = k_list[int(np.argmax(coh_arr))]
+
+    print(f"\nK selection summary:")
+    print(f"  Best K (combined score, w_coh={coherence_weight}) : {best_k}  (score={scores[best_idx]:.4f})")
+    print(f"  Best K by coherence alone                         : {best_k_coh}")
+    print(f"  Best K by perplexity alone                        : {best_k_perp}")
+
+    # --- plot ----------------------------------------------------------------
+    os.makedirs(output_dir, exist_ok=True)
+    fig, axes = plt.subplots(1, 3, figsize=(16, 5))
+
+    axes[0].plot(k_list, perplexities, marker="o", color="steelblue")
+    axes[0].axvline(best_k, color="red", linestyle="--", label=f"best K={best_k}")
+    axes[0].set_xlabel("K"); axes[0].set_ylabel("Perplexity")
+    axes[0].set_title("Perplexity vs. K"); axes[0].legend()
+
+    axes[1].plot(k_list, coherences, marker="o", color="darkorange")
+    axes[1].axvline(best_k, color="red", linestyle="--", label=f"best K={best_k}")
+    axes[1].set_xlabel("K"); axes[1].set_ylabel(f"{coherence_measure} Coherence")
+    axes[1].set_title("Coherence vs. K"); axes[1].legend()
+
+    axes[2].plot(k_list, scores, marker="o", color="green")
+    axes[2].axvline(best_k, color="red", linestyle="--", label=f"best K={best_k}")
+    axes[2].set_xlabel("K"); axes[2].set_ylabel("Combined Score")
+    axes[2].set_title(f"Combined Score vs. K\n(w_coh={coherence_weight})")
+    axes[2].legend()
+
+    fig.suptitle(f"LDA K selection — {country_name}", fontsize=13)
+    plt.tight_layout()
+    plot_path = os.path.join(output_dir, f"k_selection_{country_name}.png")
+    plt.savefig(plot_path, dpi=150)
+    plt.close()
+    print(f"K selection plot saved to {plot_path}")
+
+    results = {
+        k: {"perplexity": p, "coherence": c, "score": float(s)}
+        for k, p, c, s in zip(k_list, perplexities, coherences, scores)
+    }
+    return best_k, results
+
 
 if __name__ == "__main__":
 
     force_preprocess = "--force-preprocess" in os.sys.argv[1:]
+    use_cached_df = "--use-cached-df" in os.sys.argv[1:]
+    run_k_search = "--find-best-k" in os.sys.argv[1:]
     positional_args = [arg for arg in os.sys.argv[1:] if not arg.startswith("--")]
     country_name = positional_args[0] if len(positional_args) > 0 else "all"
 
@@ -51,14 +158,12 @@ if __name__ == "__main__":
         print(f"Warning: Hawkes analysis skipped due to error: {e}\n")
 '''
     
-    pdb.set_trace()
-    
     df_w_texts = webscrape_articles(
-                    df, 
-                    N=len(df), 
-                    random_state=42, 
-                    cache_file=f"data/gdelt/articles_with_texts_{country_name}.csv", 
-                    use_cached_df=True, 
+                    df,
+                    N=len(df),
+                    random_state=42,
+                    cache_file=f"data/gdelt/articles_with_texts_{country_name}.csv",
+                    use_cached_df=use_cached_df,
                     save_cache=True
                 )
     
@@ -139,11 +244,30 @@ if __name__ == "__main__":
         output_path=os.path.join("output", f"seed_coverage_{country_name}.json"),
     )
 
-    k = 150
-    alpha = 0.2 
-    eta = 0.001  # Will be changes to seeded prior.
+    alpha = 0.2
+    eta = 0.001  # Will be changed to seeded prior.
     min_cf = 5
     tw = tp.TermWeight.IDF
+
+    k = 150
+    if run_k_search:
+        k_range = range(50, 251, 25)
+        best_k, k_search_results = find_best_k(
+            final_chunked_documents,
+            k_values=k_range,
+            alpha=alpha,
+            eta=eta,
+            min_cf=min_cf,
+            tw=tw,
+            n_iterations=10000,
+            coherence_measure="c_v",
+            top_n=20,
+            coherence_weight=0.7,
+            output_dir="output",
+            country_name=country_name,
+        )
+        print(f"\nUsing K={best_k} (from K search) for main model.")
+        k = best_k
 
     seed_weight = 10.0
     regular_weight = 0.001
@@ -170,7 +294,7 @@ if __name__ == "__main__":
     model = set_seeded_prior(model, seed_lexicon, topic_name_to_id=topic_name_to_id, seed_weight=seed_weight, regular_weight=regular_weight)
 
 
-    total_iterations = 8000
+    total_iterations = 10000
     burn_in = 7000           # Wait until the model has converged to start sampling
     sample_interval = 50     # Take a snapshot every 50 iterations to avoid autocorrelation
     print_interval = 500     # Keep your standard logging interval

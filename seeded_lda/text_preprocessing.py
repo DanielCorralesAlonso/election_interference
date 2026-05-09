@@ -469,20 +469,6 @@ def remove_near_duplicates(df, text_col="Full_Text", similarity_threshold=5, min
             f"Duplicate clustering used simhash with threshold={similarity_threshold}; "
             f"largest cluster size={report['largest_cluster_size']}."
         )
-    
-    # Print textual examples
-    all_examples = exact_examples + near_examples
-    if all_examples:
-        print(f"\nExample duplicate pairs (showing first {len(all_examples)}):")
-        for i, example in enumerate(all_examples, 1):
-            example_type = example["type"]
-            if example_type == "exact":
-                print(f"\n  [{i}] EXACT DUPLICATE:")
-            else:
-                distance = example.get("distance", "?")
-                print(f"\n  [{i}] NEAR DUPLICATE (distance={distance}):")
-            print(f"      Original: {example['representative_text'][:180]}...")
-            print(f"      Removed:  {example['duplicate_text'][:180]}...")
 
     return deduplicated_df, report
 
