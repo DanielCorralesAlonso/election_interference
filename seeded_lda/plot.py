@@ -1,6 +1,7 @@
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import pandas as pd
+import numpy as np
 import os
 
 # Make all plots publication-ready with larger fonts
@@ -18,37 +19,24 @@ plt.rcParams.update({
 
 def plot_topic_evolution(
     mdl,
-    df_chunked,
     df_w_texts,
     topic_id_to_name,
     output_dir="output",
     country_name="",
     topics_to_plot=None,
+    top_n_prominence=5,
 ):
-    # ==========================================
-    # 1. EXTRACT DATA & REASSEMBLE THE CHUNKS
-    # ==========================================
     print("Extracting topic distributions...")
 
     os.makedirs(output_dir, exist_ok=True)
 
-    # Create a list to hold the data for every chunk
     chunk_data = []
 
-    # Ensure we have topics to work with for spike detection and plotting.
     if topics_to_plot is None:
         try:
-            keys = sorted(topic_id_to_name.keys())
-            topics_to_plot = keys[:3] if len(keys) >= 3 else keys
+            topics_to_plot = sorted(topic_id_to_name.keys())
         except Exception:
             topics_to_plot = [0, 1, 2]
-
-    if len(mdl.docs) != len(df_chunked):
-        raise ValueError(
-            f"mdl.docs ({len(mdl.docs)}) and df_chunked ({len(df_chunked)}) must have the same length. "
-            "For country-specific plots, pass the full chunked dataframe and a filtered df_w_texts slice "
-            "without resetting its index, or train a separate model for that country."
-        )
 
     def topic_label(k_id):
         if k_id in topic_id_to_name:
@@ -62,27 +50,29 @@ def plot_topic_evolution(
             pass
         return f"Topic_{k_id}"
 
-    # Loop through every document in the tomotopy model
-    for idx, doc in enumerate(mdl.docs):
-        # Get the mathematical distribution across all topics for this specific chunk
-        dist = doc.get_topic_dist()
-        
-        # Get the original article index from our chunked dataframe
-        original_idx = df_chunked.iloc[idx]['Original_Index']
-        
-        # Store it as a dictionary
-        row_data = {'Original_Index': original_idx}
+    # Build topic distributions filtered to articles present in df_w_texts.
+    # mdl.docs may be a MultiChainSummary (averaged) or a raw tomotopy model.
+    valid_indices = set(df_w_texts.index)
+    for idx in range(len(mdl.docs)):
+        if idx not in valid_indices:
+            continue
+        dist = mdl.docs[idx].get_topic_dist()
+        row_data = {'Original_Index': idx}
         for k_id, prob in enumerate(dist):
             row_data[f'Topic_{k_id}'] = prob
-            
         chunk_data.append(row_data)
 
-    # Convert to a DataFrame
-    df_dists = pd.DataFrame(chunk_data)
+    df_article_topics = pd.DataFrame(chunk_data)
 
-    # Because one article was split into multiple chunks, we group by the Original_Index
-    # and take the mean to reconstruct the article's total topic distribution.
-    df_article_topics = df_dists.groupby('Original_Index').mean().reset_index()
+    # Build prominence matrix: 1 if topic is in top-N for that article, else 0
+    _all_topic_cols = [c for c in df_article_topics.columns if c.startswith('Topic_')]
+    _prob_vals = df_article_topics[_all_topic_cols].values
+    _top_idx = np.argsort(_prob_vals, axis=1)[:, -top_n_prominence:]
+    _prom_vals = np.zeros_like(_prob_vals)
+    for _i, _ti in enumerate(_top_idx):
+        _prom_vals[_i, _ti] = 1.0
+    df_article_prominence = pd.DataFrame(_prom_vals, columns=_all_topic_cols)
+    df_article_prominence['Original_Index'] = df_article_topics['Original_Index'].values
 
     # ==========================================
     # 2. MERGE WITH THE ORIGINAL TIMESTAMPS
@@ -111,10 +101,7 @@ def plot_topic_evolution(
 
     # Group by day and compute mean topic probability for each day.
     # Fill missing days with zeros so plots remain continuous when no articles were published.
-    daily_trends = df_final[topic_cols].resample('D').mean().fillna(0)
-
-    # Smooth with a 7-day rolling window so spikes are still day-resolved.
-    smoothed_trends = daily_trends.rolling(window=7, min_periods=1).mean()
+    smoothed_trends = df_final[topic_cols].resample('W').mean().fillna(0)
 
     # ==========================================
     # 3.5 SPIKE DETECTION & EXPORT
@@ -151,7 +138,7 @@ def plot_topic_evolution(
                 continue
 
             for spike_dt, spike_val in top_spikes.items():
-                fh.write(f"Spike day {spike_dt.date()} (7-day smoothed value={spike_val * 100:.1f}%)\n")
+                fh.write(f"Spike week ending {spike_dt.date()} (weekly value={spike_val * 100:.1f}%)\n")
 
                 # Articles for the exact spike day.
                 day_articles = df_articles[df_articles['Event_Date'].dt.date == spike_dt.date()]
@@ -178,17 +165,10 @@ def plot_topic_evolution(
                     }
 
                     # try to get the original text from df_w_texts (should preserve original indices)
-                    full_text = None
                     try:
                         full_text = str(df_w_texts.loc[orig_idx, 'Full_Text'])
                     except Exception:
-                        # fallback: try matching by Original_Index in df_chunked
-                        try:
-                            candidate_rows = df_chunked[df_chunked['Original_Index'] == orig_idx]
-                            if not candidate_rows.empty and 'Full_Text' in candidate_rows.columns:
-                                full_text = str(candidate_rows.iloc[0]['Full_Text'])
-                        except Exception:
-                            full_text = ''
+                        full_text = ''
 
                     fh.write(f"  Article index: {orig_idx} | Date: {event_date.date()}\n")
                     fh.write(f"  Topic probs (> {THRESHOLD}): {topic_probs}\n")
@@ -204,14 +184,10 @@ def plot_topic_evolution(
     # Set up a large, clean figure
     plt.figure(figsize=(14, 7))
 
-    # Choose which specific topics you want to plot so it isn't too cluttered
-    # Let's assume you want to plot your seeded topics (e.g., IDs 0, 1, and 2)
-    # You can look up your exact IDs from your `topic_id_to_name` mapping
-    if topics_to_plot is None:
-        topics_to_plot = [0, 1, 2]
-
-    # Define some nice colors
-    colors = ['#1f77b4', '#d62728', '#2ca02c', '#ff7f0e', '#9467bd']
+    colors = [
+        '#1f77b4', '#d62728', '#2ca02c', '#ff7f0e', '#9467bd',
+        '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf',
+    ]
 
     for i, k_id in enumerate(topics_to_plot):
         # Get the human-readable label
@@ -229,7 +205,7 @@ def plot_topic_evolution(
 
     # Format the Graph visually
     plt.title(f"Evolution of political narratives in the news - {country_name}", fontsize=18, fontweight='bold', pad=20)
-    plt.ylabel("Percentage of Weekly News Coverage (%)", fontsize=12)
+    plt.ylabel("Weekly topic share (%)", fontsize=12)
     plt.xlabel("Date", fontsize=12)
 
     # Format the X-axis dates nicely
@@ -246,7 +222,47 @@ def plot_topic_evolution(
     plt.savefig(os.path.join(output_dir, f"topic_evolution_{country_name}.png"), dpi=300)
     plt.close()
 
+    # ==========================================
+    # 5. PROMINENCE PLOT (top-N binary)
+    # ==========================================
+    df_prom_final = df_w_texts[['Event_Date']].merge(
+        df_article_prominence,
+        left_index=True,
+        right_on='Original_Index',
+    )
+    df_prom_final['Event_Date'] = pd.to_datetime(
+        df_prom_final['Event_Date'].astype(str), format='%Y%m%d'
+    )
+    df_prom_final.set_index('Event_Date', inplace=True)
 
+    prom_topic_cols = [c for c in df_prom_final.columns if c.startswith('Topic_')]
+    smoothed_prom = df_prom_final[prom_topic_cols].resample('W').mean().fillna(0)
+
+    plt.figure(figsize=(14, 7))
+    for i, k_id in enumerate(topics_to_plot):
+        col = f'Topic_{k_id}'
+        if col not in smoothed_prom.columns:
+            continue
+        label = topic_id_to_name.get(k_id, f'Topic {k_id}')
+        plt.plot(
+            smoothed_prom.index,
+            smoothed_prom[col] * 100,
+            label=label,
+            linewidth=3,
+            color=colors[i % len(colors)],
+        )
+
+    plt.title(f"Topic prominence in news coverage — {country_name}", fontsize=18, fontweight='bold', pad=20)
+    plt.ylabel(f"Articles with topic in top-{top_n_prominence} (%)", fontsize=12)
+    plt.xlabel("Date", fontsize=12)
+    plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
+    plt.gca().xaxis.set_major_locator(mdates.MonthLocator(interval=1))
+    plt.xticks(rotation=45)
+    plt.grid(True, linestyle='--', alpha=0.6)
+    plt.legend(title="Seeded Topics", fontsize=11, title_fontsize=12, loc='upper left')
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, f"topic_prominence_{country_name}.png"), dpi=300)
+    plt.close()
 
 
 
@@ -263,7 +279,6 @@ def plot_document_length_distribution(df_w_texts, text_col, output_dir="output",
 
 def plot_topic_evolution_comparison(
     mdl,
-    df_chunked,
     df_w_texts,
     topic_id_to_name,
     output_dir="output",
@@ -295,37 +310,35 @@ def plot_topic_evolution_comparison(
 
     if topics_to_plot is None:
         try:
-            keys = sorted(topic_id_to_name.keys())
-            topics_to_plot = keys[:3] if len(keys) >= 3 else keys
+            topics_to_plot = sorted(topic_id_to_name.keys())
         except Exception:
             topics_to_plot = [0, 1, 2]
 
-    if len(mdl.docs) != len(df_chunked):
+    if len(mdl.docs) != len(df_w_texts):
         raise ValueError(
-            f"mdl.docs ({len(mdl.docs)}) and df_chunked ({len(df_chunked)}) must have the same length. "
-            "For country-specific plots, pass the full chunked dataframe and a filtered df_w_texts slice "
-            "without resetting its index, or train a separate model for that country."
+            f"mdl.docs ({len(mdl.docs)}) and df_w_texts ({len(df_w_texts)}) must have the same length."
         )
 
+    # Build full topic distribution dataframe once, then filter per country
+    all_dists = []
+    for idx, doc in enumerate(mdl.docs):
+        dist = doc.get_topic_dist()
+        row_data = {"Original_Index": idx}
+        for k_id, prob in enumerate(dist):
+            row_data[f"Topic_{k_id}"] = prob
+        all_dists.append(row_data)
+    df_all_topics = pd.DataFrame(all_dists)
+
     def build_smoothed_trends(country_df):
-        chunk_data = []
-        for idx, doc in enumerate(mdl.docs):
-            dist = doc.get_topic_dist()
-            original_idx = df_chunked.iloc[idx]["Original_Index"]
-            row_data = {"Original_Index": original_idx}
-            for k_id, prob in enumerate(dist):
-                row_data[f"Topic_{k_id}"] = prob
-            chunk_data.append(row_data)
-
-        df_dists = pd.DataFrame(chunk_data)
-        df_article_topics = df_dists.groupby("Original_Index").mean().reset_index()
-
         event_col = "Event_Date" if "Event_Date" in country_df.columns else None
         if event_col is None:
             return None
 
+        country_indices = set(country_df.index)
+        df_country_topics = df_all_topics[df_all_topics["Original_Index"].isin(country_indices)]
+
         df_final = country_df[[event_col]].merge(
-            df_article_topics,
+            df_country_topics,
             left_index=True,
             right_on="Original_Index",
         )
@@ -338,8 +351,7 @@ def plot_topic_evolution_comparison(
         df_final.set_index("Event_Date", inplace=True)
 
         topic_cols = [col for col in df_final.columns if col.startswith("Topic_")]
-        daily_trends = df_final[topic_cols].resample("D").mean().fillna(0)
-        return daily_trends.rolling(window=7, min_periods=1).mean()
+        return df_final[topic_cols].resample("W").mean().fillna(0)
 
     country_frames = []
     if "Country" not in df_w_texts.columns:
@@ -360,7 +372,10 @@ def plot_topic_evolution_comparison(
         print("Warning: no matching country rows found for the comparison plot. Skipping.")
         return
 
-    colors = ["#1f77b4", "#d62728", "#2ca02c", "#ff7f0e", "#9467bd"]
+    colors = [
+        '#1f77b4', '#d62728', '#2ca02c', '#ff7f0e', '#9467bd',
+        '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf',
+    ]
     all_values = []
     for _, trends in country_frames:
         for k_id in topics_to_plot:

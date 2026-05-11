@@ -960,47 +960,4 @@ def preprocess_pipeline(
     return final_documents
 
 
-def chunk_dataframe(df, token_col='Processed_Tokens', text_col='Full_Text', chunk_size=2000):
-    """
-    Slices long documents into smaller chunks while preserving the original text 
-    and a reference to the original row index.
-    """
-    chunked_rows = []
-    
-    # Use tqdm to show a progress bar
-    for original_idx, row in tqdm(df.iterrows(), total=len(df), desc="Chunking"):
-        doc_tokens = row[token_col]
-        original_text = row[text_col]
-        
-        # 1. Skip completely empty documents (Fixes the tomotopy empty doc bug!)
-        if not isinstance(doc_tokens, list) or len(doc_tokens) == 0:
-            continue
-            
-        # 2. If the document is shorter than the chunk size, keep it as one piece
-        if len(doc_tokens) <= chunk_size:
-            chunked_rows.append({
-                'Original_Index': original_idx,
-                'Chunk_ID': 1, # Just 1 chunk
-                'Unified_Tokens': doc_tokens,
-                'Full_Text': original_text
-            })
-            
-        # 3. Slicing long documents
-        else:
-            chunk_counter = 1
-            for i in range(0, len(doc_tokens), chunk_size):
-                chunk = doc_tokens[i : i + chunk_size]
-                
-                # Only keep chunks that have enough words to be meaningful
-                if len(chunk) > 20: 
-                    chunked_rows.append({
-                        'Original_Index': original_idx,
-                        'Chunk_ID': chunk_counter,
-                        'Unified_Tokens': chunk,
-                        'Full_Text': original_text
-                    })
-                    chunk_counter += 1
-                    
-    # Return a brand new dataframe containing the split chunks
-    return pd.DataFrame(chunked_rows)
 

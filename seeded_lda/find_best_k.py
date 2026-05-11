@@ -32,7 +32,7 @@ def find_best_k(documents, k_values, alpha=0.2, eta=0.001, min_cf=5,
                 w_coherence=0.5, w_diversity=0.3, w_perplexity=0.2,
                 use_elbow=True,
                 seed_lexicon=None, seed_weight=10.0, regular_weight=0.001,
-                output_dir="output", country_name="all"):
+                output_dir="output", country_name="all", random_seed=None):
     """
     Train LDA models over a range of K values and select the best K using a
     weighted combination of three complementary, scientifically validated metrics.
@@ -101,7 +101,7 @@ def find_best_k(documents, k_values, alpha=0.2, eta=0.001, min_cf=5,
     )
 
     for k_val in tqdm(k_list, desc="K search"):
-        model_k = tp.LDAModel(k=k_val, alpha=alpha, eta=eta, min_cf=min_cf, tw=tw)
+        model_k = tp.LDAModel(k=k_val, alpha=alpha, eta=eta, min_cf=min_cf, tw=tw, seed=random_seed)
         for doc in documents:
             model_k.add_doc(doc)
         if seed_lexicon:
