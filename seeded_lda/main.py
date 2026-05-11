@@ -1,125 +1,17 @@
 import pandas as pd
 from tqdm import tqdm
 import tomotopy as tp
-import pdb
 import os
-import pickle
-import numpy as np
-import matplotlib.pyplot as plt
 
 from webscrapping import webscrape_articles
-from text_preprocessing import clean_scraped_text, preprocess_texts, n_gram_pipeline, chunk_dataframe, detect_languages_in_texts, preprocess_pipeline, collect_seed_term_candidates, report_seed_coverage, build_preprocessing_config
+from text_preprocessing import clean_scraped_text, chunk_dataframe, detect_languages_in_texts, preprocess_pipeline, collect_seed_term_candidates, report_seed_coverage
 from config import custom_words_to_remove, seed_lexicon
 from set_seeded_prior import set_seeded_prior
 from utils import print_topic_overview, print_document_topics, print_corpus_topic_distribution, print_topic_distinctive_tokens, print_topic_coherence
 from plot import plot_topic_evolution, plot_topic_evolution_comparison, plot_document_length_distribution
-from hawkes_analysis import run_hawkes_news_analysis
 from topic_stability_analysis import run_topic_stability_pipeline
+from find_best_k import find_best_k
 
-
-def find_best_k(documents, k_values, alpha=0.2, eta=0.001, min_cf=5,
-                tw=None, n_iterations=500, coherence_measure="c_v", top_n=10,
-                coherence_weight=0.7, output_dir="output", country_name="all"):
-    """
-    Train LDA models over a range of K values and select the best K using a
-    combined score of c_v coherence and perplexity.
-
-    Rationale:
-      - Perplexity alone always favours large K (statistical overfit).
-      - c_v coherence correlates best with human topic judgements and typically
-        peaks then plateaus, giving a genuine signal.
-      - The combined score normalises both metrics to [0,1] and weights them:
-            score = coherence_weight * norm_coherence
-                  + (1 - coherence_weight) * (1 - norm_perplexity)
-        Default coherence_weight=0.7 reflects that coherence is the more
-        reliable guide.
-
-    Returns
-    -------
-    best_k : int
-        K that maximises the combined score.
-    results : dict
-        Maps each K to {"perplexity": ..., "coherence": ..., "score": ...}.
-    """
-    if tw is None:
-        tw = tp.TermWeight.IDF
-
-    k_list = list(k_values)
-    perplexities, coherences = [], []
-
-    print(f"\nSearching for best K over {k_list} "
-          f"({n_iterations} iterations each, coherence={coherence_measure})...")
-
-    for k_val in tqdm(k_list, desc="K search"):
-        model_k = tp.LDAModel(k=k_val, alpha=alpha, eta=eta, min_cf=min_cf, tw=tw)
-        for doc in documents:
-            model_k.add_doc(doc)
-        model_k.train(n_iterations)
-
-        perp = model_k.perplexity
-        coh_eval = tp.coherence.Coherence(model_k, coherence=coherence_measure, top_n=top_n)
-        avg_coh = float(np.mean([coh_eval.get_score(topic_id=i) for i in range(model_k.k)]))
-
-        perplexities.append(perp)
-        coherences.append(avg_coh)
-        tqdm.write(f"  K={k_val:>4d}  perplexity={perp:.4f}  coherence={avg_coh:.4f}")
-
-    # --- normalise to [0, 1] ------------------------------------------------
-    perp_arr = np.array(perplexities)
-    coh_arr  = np.array(coherences)
-
-    def _norm(arr):
-        rng = arr.max() - arr.min()
-        return (arr - arr.min()) / rng if rng > 0 else np.ones_like(arr) * 0.5
-
-    norm_perp = _norm(perp_arr)   # lower raw → lower norm → better
-    norm_coh  = _norm(coh_arr)    # higher raw → higher norm → better
-
-    scores = coherence_weight * norm_coh + (1.0 - coherence_weight) * (1.0 - norm_perp)
-    best_idx = int(np.argmax(scores))
-    best_k   = k_list[best_idx]
-
-    # secondary diagnostics
-    best_k_perp = k_list[int(np.argmin(perp_arr))]
-    best_k_coh  = k_list[int(np.argmax(coh_arr))]
-
-    print(f"\nK selection summary:")
-    print(f"  Best K (combined score, w_coh={coherence_weight}) : {best_k}  (score={scores[best_idx]:.4f})")
-    print(f"  Best K by coherence alone                         : {best_k_coh}")
-    print(f"  Best K by perplexity alone                        : {best_k_perp}")
-
-    # --- plot ----------------------------------------------------------------
-    os.makedirs(output_dir, exist_ok=True)
-    fig, axes = plt.subplots(1, 3, figsize=(16, 5))
-
-    axes[0].plot(k_list, perplexities, marker="o", color="steelblue")
-    axes[0].axvline(best_k, color="red", linestyle="--", label=f"best K={best_k}")
-    axes[0].set_xlabel("K"); axes[0].set_ylabel("Perplexity")
-    axes[0].set_title("Perplexity vs. K"); axes[0].legend()
-
-    axes[1].plot(k_list, coherences, marker="o", color="darkorange")
-    axes[1].axvline(best_k, color="red", linestyle="--", label=f"best K={best_k}")
-    axes[1].set_xlabel("K"); axes[1].set_ylabel(f"{coherence_measure} Coherence")
-    axes[1].set_title("Coherence vs. K"); axes[1].legend()
-
-    axes[2].plot(k_list, scores, marker="o", color="green")
-    axes[2].axvline(best_k, color="red", linestyle="--", label=f"best K={best_k}")
-    axes[2].set_xlabel("K"); axes[2].set_ylabel("Combined Score")
-    axes[2].set_title(f"Combined Score vs. K\n(w_coh={coherence_weight})")
-    axes[2].legend()
-
-    fig.suptitle(f"LDA K selection — {country_name}", fontsize=13)
-    plt.tight_layout()
-    plot_path = os.path.join(output_dir, f"k_selection_{country_name}.png")
-    plt.savefig(plot_path, dpi=150)
-    plt.close()
-    print(f"K selection plot saved to {plot_path}")
-
-    results = {
-        k: {"perplexity": p, "coherence": c, "score": float(s)}
-        for k, p, c, s in zip(k_list, perplexities, coherences, scores)
-    }
-    return best_k, results
 
 
 if __name__ == "__main__":
@@ -143,21 +35,6 @@ if __name__ == "__main__":
     df.drop_duplicates(inplace=True)
     print(f"Loaded {len(df)} unique articles for country: {country_name}\n")
 
-    '''try:
-        hawkes_summary = run_hawkes_news_analysis(
-            df,
-            output_dir="output",
-            country_name=country_name,
-            countries=("RUS", "CHN", "IRN"),
-        )
-        print(
-            f"Hawkes analysis completed for {len(hawkes_summary.get('countries', {}))} country/countries. "
-            f"Summary saved to output/hawkes_news_summary_{country_name}.json\n"
-        )
-    except Exception as e:
-        print(f"Warning: Hawkes analysis skipped due to error: {e}\n")
-'''
-    
     df_w_texts = webscrape_articles(
                     df,
                     N=len(df),
@@ -184,7 +61,6 @@ if __name__ == "__main__":
     df_w_texts.drop(df_w_texts[df_w_texts['Full_Text'] == ''].index, inplace=True)
     print(f"After cleaning, we have {len(df_w_texts)} articles with non-empty text.\n")
 
-    # pdb.set_trace()
     df_w_texts = detect_languages_in_texts(df_w_texts, text_col='Full_Text')
     print(f"Filtering to only English articles...")
     df_w_texts = df_w_texts[df_w_texts['Language'] == 'en'].reset_index(drop=True)
@@ -192,7 +68,6 @@ if __name__ == "__main__":
     for i in range(len(df_w_texts)):
         df_w_texts.loc[i, 'Full_Text'] = df_w_texts.loc[i, 'Full_Text'].encode('ascii', 'ignore').decode('utf-8')
 
-    # pdb.set_trace()
     protected_seed_terms = collect_seed_term_candidates(seed_lexicon)
     preprocessing_result = preprocess_pipeline(
         df_w_texts,
@@ -245,107 +120,70 @@ if __name__ == "__main__":
     )
 
     alpha = 0.2
-    eta = 0.001  # Will be changed to seeded prior.
+    eta = 0.001
     min_cf = 5
     tw = tp.TermWeight.IDF
 
-    k = 150
+    seed_weight = 10.0
+    regular_weight = 0.001
+    topic_name_to_id = {name: i for i, name in enumerate(seed_lexicon.keys())}
+    topic_id_to_name = {i: name for name, i in topic_name_to_id.items()}
+
+    ll_trace = []
+
     if run_k_search:
         k_range = range(50, 251, 25)
-        best_k, k_search_results = find_best_k(
+        k, model, k_search_results = find_best_k(
             final_chunked_documents,
             k_values=k_range,
             alpha=alpha,
             eta=eta,
             min_cf=min_cf,
             tw=tw,
-            n_iterations=10000,
+            n_iterations=15000,
             coherence_measure="c_v",
             top_n=20,
-            coherence_weight=0.7,
+            use_diversity=True,
+            diversity_top_n=25,
+            w_coherence=0.5,
+            w_diversity=0.3,
+            w_perplexity=0.2,
+            seed_lexicon=seed_lexicon,
+            seed_weight=seed_weight,
+            regular_weight=regular_weight,
             output_dir="output",
             country_name=country_name,
         )
-        print(f"\nUsing K={best_k} (from K search) for main model.")
-        k = best_k
+        print(f"\nReusing K={k} model from K search.")
+    else:
+        k = 150
+        model = tp.LDAModel(k=k, alpha=alpha, eta=eta, min_cf=min_cf, tw=tw)
+        print(f"Adding {len(final_chunked_documents)} documents to the model...")
+        for doc in final_chunked_documents:
+            model.add_doc(doc)
+        model = set_seeded_prior(model, seed_lexicon, topic_name_to_id=topic_name_to_id,
+                                 seed_weight=seed_weight, regular_weight=regular_weight)
 
-    seed_weight = 10.0
-    regular_weight = 0.001
+        total_iterations = 10000
+        burn_in = 7000
+        sample_interval = 50
+        print_interval = 500
 
-    #pdb.set_trace()
+        print(f"Training for {total_iterations} iterations...")
+        model.train(0)
 
-    model = tp.LDAModel(
-                k=k, 
-                alpha=alpha, 
-                eta=eta, 
-                min_cf=min_cf, 
-                # rm_top=100, 
-                tw = tw
-            )
-    
-    # 2. Add Documents
-    print(f"Adding {len(final_chunked_documents)} documents to the model...")
-    for doc in final_chunked_documents:
-        model.add_doc(doc)
+        with tqdm(total=total_iterations, desc="Gibbs Sampling") as pbar:
+            for i in range(0, total_iterations, sample_interval):
+                model.train(sample_interval)
 
-    topic_name_to_id = {name: i for i, name in enumerate(seed_lexicon.keys())}
-    topic_id_to_name = {i: name for name, i in topic_name_to_id.items()}
+                if (i + sample_interval) % print_interval == 0:
+                    current_ll = model.ll_per_word
+                    ll_trace.append(current_ll)
+                    tqdm.write(f"Iteration: {i + sample_interval}\tLog-likelihood: {current_ll:.4f}")
 
-    model = set_seeded_prior(model, seed_lexicon, topic_name_to_id=topic_name_to_id, seed_weight=seed_weight, regular_weight=regular_weight)
+                pbar.update(sample_interval)
 
-
-    total_iterations = 10000
-    burn_in = 7000           # Wait until the model has converged to start sampling
-    sample_interval = 50     # Take a snapshot every 50 iterations to avoid autocorrelation
-    print_interval = 500     # Keep your standard logging interval
-
-    print(f"Training for {total_iterations} iterations...")
-    model.train(0) # Initialize parameters
-
-    phi_samples = [] # List to store the topic-word distributions
-    ll_trace = []    # List to store log-likelihood for plotting later
-
-    with tqdm(total=total_iterations, desc="Gibbs Sampling") as pbar:
-        for i in range(0, total_iterations, sample_interval):
-            model.train(sample_interval)
-            
-            # 1. Log-Likelihood Tracking
-            if (i + sample_interval) % print_interval == 0:
-                current_ll = model.ll_per_word
-                ll_trace.append(current_ll)
-                # tqdm.write ensures the print doesn't break the progress bar visual
-                tqdm.write(f"Iteration: {i + sample_interval}\tLog-likelihood: {current_ll:.4f}")
-                
-            # 2. MCMC Posterior Sampling (Only after burn-in!)
-            if (i + sample_interval) > burn_in:
-                # model.get_topic_word_dist(k) returns a 1D array of word probabilities for topic K
-                # We build a 2D matrix (K topics x V vocabulary) for this specific sample
-                current_phi = np.array([model.get_topic_word_dist(k) for k in range(model.k)])
-                phi_samples.append(current_phi)
-                
-            pbar.update(sample_interval)
-
-    print("Training complete!")
-
-    # ==========================================
-    # 6. Calculate Topic Uncertainty (Variance)
-    # ==========================================
-    '''# Convert list of 2D matrices into a 3D tensor: Shape (num_samples, K, V)
-    phi_samples_tensor = np.array(phi_samples)
-
-    # Calculate the variance across the samples (axis=0)
-    # Resulting matrix shape: (K, V) -> The variance of every word in every topic
-    phi_variance = np.var(phi_samples_tensor, axis=0)
-
-    # Example: Get the average variance for each topic to see which topics are most unstable
-    average_topic_variance = np.mean(phi_variance, axis=1)
-
-    print("\n--- Topic Uncertainty Report ---")
-    for k in range(model.k):
-        # Differentiate your seeded topics vs unseeded based on your dictionaries
-        topic_name = topic_id_to_name.get(k, f"Unseeded_{k}")
-        print(f"Topic {k} ({topic_name}) Average Word Variance: {average_topic_variance[k]:.8f}")
-'''
+        print("Training complete!")
 
     print(f"Model perplexity: {model.perplexity:.4f}")
 

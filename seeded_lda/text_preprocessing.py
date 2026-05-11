@@ -53,30 +53,30 @@ def strip_boilerplate_text(text):
         return ""
 
     boilerplate_patterns = [
-        r"\bsubscribe\b.*",
-        r"\bsign up\b.*",
-        r"\bnewsletter\b.*",
-        r"\bread more\b.*",
-        r"\bclick here\b.*",
-        r"\bprivacy policy\b.*",
-        r"\bcookie policy\b.*",
-        r"\ball rights reserved\b.*",
-        r"\bterms of service\b.*",
-        r"\bcontinue reading\b.*",
-        r"\bopen in app\b.*",
-        r"\bfollow us\b.*",
-        r"\bshare this article\b.*",
-        r"\bview comments\b.*",
-        r"\brelated articles\b.*",
-        r"\brecommended stories\b.*",
-        r"\bsponsored content\b.*",
-        r"\badvertisement\b.*",
-        r"\bwatch live\b.*",
+        r"\bsubscribe\b.*$",
+        r"\bsign up\b.*$",
+        r"\bnewsletter\b.*$",
+        r"\bread more\b.*$",
+        r"\bclick here\b.*$",
+        r"\bprivacy policy\b.*$",
+        r"\bcookie policy\b.*$",
+        r"\ball rights reserved\b.*$",
+        r"\bterms of service\b.*$",
+        r"\bcontinue reading\b.*$",
+        r"\bopen in app\b.*$",
+        r"\bfollow us\b.*$",
+        r"\bshare this article\b.*$",
+        r"\bview comments\b.*$",
+        r"\brelated articles\b.*$",
+        r"\brecommended stories\b.*$",
+        r"\bsponsored content\b.*$",
+        r"\badvertisement\b.*$",
+        r"\bwatch live\b.*$",
     ]
 
     stripped_text = text
     for pattern in boilerplate_patterns:
-        stripped_text = re.sub(pattern, " ", stripped_text, flags=re.IGNORECASE | re.DOTALL)
+        stripped_text = re.sub(pattern, " ", stripped_text, flags=re.IGNORECASE | re.MULTILINE)
 
     stripped_text = re.sub(r"\b(?:home|menu|search|login|register|share|follow|download|cookie|advertisement|newsletter)\b", " ", stripped_text, flags=re.IGNORECASE)
     stripped_text = re.sub(r"\s+", " ", stripped_text)
@@ -737,7 +737,7 @@ def multiple_lang_preprocessing_pipeline(df_w_texts, custom_words_to_remove=None
     print("Detecting languages and preprocessing...")
     native_tokenized_docs = [] 
 
-    for idx, row in tqdm(df_w_texts.iterrows(), total=len(df_w_texts), desc="Cleaning Texts"):
+    for _, row in tqdm(df_w_texts.iterrows(), total=len(df_w_texts), desc="Cleaning Texts"):
         lang = safe_detect(row['Full_Text'])
         text = row['Full_Text']
         
@@ -797,7 +797,6 @@ def n_gram_pipeline(english_processed_docs, min_count=15, threshold=0.005):
     # Apply the trained n-gram model back to your documents
     final_documents = []
     for doc in tqdm(english_processed_docs, desc="Applying N-Gram Model"):
-        bigram_model[doc]  # This will transform the doc in-place, adding bigrams where detected
         final_documents.append(bigram_model[doc])
 
     return final_documents
@@ -879,12 +878,38 @@ def preprocess_pipeline(
         final_documents = aligned
         qa_report["cache"] = {"hit": True, "source": cache_path if os.path.exists(cache_path) else legacy_cache_path}
     else:
-        deduplicated_df, dedup_report = remove_near_duplicates(
-            df_w_texts,
-            text_col="Full_Text",
-            similarity_threshold=dedup_similarity_threshold,
-            min_tokens=dedup_min_tokens,
+        country_col = next(
+            (c for c in ["Country", "Initiator_Country", "country"] if c in df_w_texts.columns),
+            None,
         )
+        if country_col is not None:
+            dedup_parts = []
+            per_country_reports = {}
+            for country_val, group in df_w_texts.groupby(country_col):
+                part, report = remove_near_duplicates(
+                    group,
+                    text_col="Full_Text",
+                    similarity_threshold=dedup_similarity_threshold,
+                    min_tokens=dedup_min_tokens,
+                )
+                dedup_parts.append(part)
+                per_country_reports[str(country_val)] = report
+            deduplicated_df = pd.concat(dedup_parts)
+            dedup_report = {
+                "input_documents":        sum(r["input_documents"]        for r in per_country_reports.values()),
+                "kept_documents":         sum(r["kept_documents"]         for r in per_country_reports.values()),
+                "removed_documents":      sum(r["removed_documents"]      for r in per_country_reports.values()),
+                "exact_duplicates_removed": sum(r["exact_duplicates_removed"] for r in per_country_reports.values()),
+                "near_duplicates_removed":  sum(r["near_duplicates_removed"]  for r in per_country_reports.values()),
+                "per_country": per_country_reports,
+            }
+        else:
+            deduplicated_df, dedup_report = remove_near_duplicates(
+                df_w_texts,
+                text_col="Full_Text",
+                similarity_threshold=dedup_similarity_threshold,
+                min_tokens=dedup_min_tokens,
+            )
         qa_report["deduplication"] = dedup_report
         dedup_indices = deduplicated_df.index.tolist()
 
