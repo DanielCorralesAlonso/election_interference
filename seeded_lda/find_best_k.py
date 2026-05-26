@@ -123,80 +123,60 @@ def find_best_k(documents, k_values, alpha=0.2, eta=0.001, min_cf=5,
         div_str = f"  diversity={div:.4f}" if use_diversity else ""
         tqdm.write(f"  K={k_val:>4d}  perplexity={perp:.4f}  coherence={avg_coh:.4f}{div_str}")
 
-    # --- normalise to [0, 1] ------------------------------------------------
-    def _norm(arr):
-        a = np.array(arr, dtype=float)
-        rng = a.max() - a.min()
-        return (a - a.min()) / rng if rng > 0 else np.full_like(a, 0.5)
-
-    norm_perp = _norm(perplexities)
-    norm_coh  = _norm(coherences)
-
-    # renormalise weights to sum to 1
-    if use_diversity:
-        norm_div = _norm(diversities)
-        total_w  = w_coherence + w_diversity + w_perplexity
-        scores   = (w_coherence  * norm_coh
-                    + w_diversity  * norm_div
-                    + w_perplexity * (1.0 - norm_perp)) / total_w
-    else:
-        total_w = w_coherence + w_perplexity
-        scores  = (w_coherence * norm_coh + w_perplexity * (1.0 - norm_perp)) / total_w
+    # --- select K by elbow of coherence curve --------------------------------
+    # C_V coherence is the single selection criterion: it has the strongest
+    # empirical validation as a predictor of human topic quality judgements
+    # (Röder et al. 2015). Perplexity always improves with more topics and is
+    # not useful for K selection. Diversity is shown as a diagnostic panel but
+    # not used for automatic selection.
+    coh_arr = np.array(coherences, dtype=float)
 
     def _elbow_idx(arr):
-        """Perpendicular-distance elbow: index of maximum curvature in arr."""
         n = len(arr)
         if n <= 2:
-            return 0
+            return int(np.argmax(arr))
         x = np.linspace(0.0, 1.0, n)
         y = (arr - arr.min()) / (arr.max() - arr.min() + 1e-10)
         dx, dy = x[-1] - x[0], y[-1] - y[0]
         dists = np.abs(dy * (x - x[0]) - dx * (y - y[0])) / (np.sqrt(dx**2 + dy**2) + 1e-10)
         return int(np.argmax(dists))
 
-    max_idx     = int(np.argmax(scores))
-    max_k       = k_list[max_idx]
-    elbow_idx   = _elbow_idx(scores)
-    elbow_k     = k_list[elbow_idx]
-    best_k      = elbow_k if use_elbow else max_k
-    best_k_perp = k_list[int(np.argmin(perplexities))]
-    best_k_coh  = k_list[int(np.argmax(coherences))]
+    elbow_idx = _elbow_idx(coh_arr)
+    elbow_k   = k_list[elbow_idx]
+    max_k     = k_list[int(np.argmax(coh_arr))]
+    best_k    = elbow_k if use_elbow else max_k
 
-    print(f"\nK selection summary:")
-    print(f"  Best K (elbow of combined score) : {elbow_k}  (score={scores[elbow_idx]:.4f})")
-    print(f"  Best K (max combined score)      : {max_k}  (score={scores[max_idx]:.4f})")
-    print(f"  Selected K                       : {best_k}  ({'elbow' if use_elbow else 'max'})")
-    print(f"  Best K by coherence              : {best_k_coh}")
-    print(f"  Best K by perplexity             : {best_k_perp}")
+    print(f"\nK selection summary (criterion: C_V coherence):")
+    print(f"  Best K (elbow of coherence) : {elbow_k}  (coherence={coh_arr[elbow_idx]:.4f})")
+    print(f"  Best K (max coherence)      : {max_k}  (coherence={coh_arr[int(np.argmax(coh_arr))]:.4f})")
+    print(f"  Selected K                  : {best_k}  ({'elbow' if use_elbow else 'max'})")
     if use_diversity:
         best_k_div = k_list[int(np.argmax(diversities))]
-        print(f"  Best K by diversity              : {best_k_div}")
+        print(f"  [diagnostic] Best K by diversity : {best_k_div}")
+    print(f"  [diagnostic] Best K by perplexity: {k_list[int(np.argmin(perplexities))]}")
 
     # --- plot ----------------------------------------------------------------
     os.makedirs(output_dir, exist_ok=True)
-    n_panels = 4 if use_diversity else 3
+    n_panels = 3 if use_diversity else 2
     fig, axes = plt.subplots(1, n_panels, figsize=(5 * n_panels, 5))
+    if n_panels == 2:
+        axes = list(axes)
 
-    def _panel(ax, y, ylabel, title, color, alt_k=None, alt_label=None):
+    def _panel(ax, y, ylabel, title, color):
         ax.plot(k_list, y, marker="o", color=color)
         ax.axvline(best_k, color="red", linestyle="--", label=f"selected K={best_k}")
-        if alt_k is not None and alt_k != best_k:
-            ax.axvline(alt_k, color="orange", linestyle=":", linewidth=1.5, label=alt_label or f"K={alt_k}")
+        if best_k != max_k:
+            ax.axvline(max_k, color="orange", linestyle=":", linewidth=1.5, label=f"max K={max_k}")
         ax.set_xlabel("K"); ax.set_ylabel(ylabel)
         ax.set_title(title); ax.legend()
 
-    _panel(axes[0], perplexities, "Perplexity",
-           "Perplexity vs. K\n(Blei et al. 2003)", "steelblue")
-    _panel(axes[1], coherences, f"{coherence_measure} Coherence",
-           f"Coherence vs. K\n(Röder et al. 2015)", "darkorange")
+    _panel(axes[0], coherences, f"{coherence_measure} Coherence",
+           f"Coherence vs. K — selection criterion\n(Röder et al. 2015)", "darkorange")
     if use_diversity:
-        _panel(axes[2], diversities, f"Topic Diversity (top-{diversity_top_n})",
-               "Diversity vs. K\n(Dieng et al. 2020)", "mediumpurple")
-    _panel(axes[-1], scores, "Combined Score",
-           f"Combined Score vs. K\n(w_coh={w_coherence}, w_div={w_diversity if use_diversity else 'off'}, w_perp={w_perplexity})",
-           "green",
-           alt_k=max_k if use_elbow else elbow_k,
-           alt_label=f"max K={max_k}" if use_elbow else f"elbow K={elbow_k}")
+        _panel(axes[1], diversities, f"Topic Diversity (top-{diversity_top_n})",
+               "Diversity vs. K — diagnostic only\n(Dieng et al. 2020)", "mediumpurple")
+    _panel(axes[-1], perplexities, "Perplexity",
+           "Perplexity vs. K — diagnostic only\n(Blei et al. 2003)", "steelblue")
 
     fig.suptitle(f"LDA K selection — {country_name}", fontsize=13)
     plt.tight_layout()
@@ -207,11 +187,7 @@ def find_best_k(documents, k_values, alpha=0.2, eta=0.001, min_cf=5,
 
     results = {}
     for i, k_val in enumerate(k_list):
-        entry = {
-            "perplexity": perplexities[i],
-            "coherence":  coherences[i],
-            "score":      float(scores[i]),
-        }
+        entry = {"perplexity": perplexities[i], "coherence": coherences[i]}
         if use_diversity:
             entry["diversity"] = diversities[i]
         results[k_val] = entry

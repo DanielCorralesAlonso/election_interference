@@ -1,6 +1,7 @@
 import pandas as pd
 from tqdm import tqdm
 import tomotopy as tp
+import numpy as np
 import os
 import random
 
@@ -16,7 +17,7 @@ from multi_chain import build_multi_chain_summary
 
 
 
-RANDOM_SEED = 39
+RANDOM_SEED = 40
 
 if __name__ == "__main__":
 
@@ -28,6 +29,8 @@ if __name__ == "__main__":
     run_k_search = "--find-best-k" in os.sys.argv[1:]
     multi_chain_arg = next((a for a in os.sys.argv[1:] if a.startswith("--multi-chain")), None)
     n_chains = int(multi_chain_arg.split("=")[1]) if multi_chain_arg and "=" in multi_chain_arg else 1
+    multi_seed_arg = next((a for a in os.sys.argv[1:] if a.startswith("--multi-seed")), None)
+    n_seeds = int(multi_seed_arg.split("=")[1]) if multi_seed_arg and "=" in multi_seed_arg else 1
     positional_args = [arg for arg in os.sys.argv[1:] if not arg.startswith("--")]
     country_name = positional_args[0] if len(positional_args) > 0 else "all"
 
@@ -154,20 +157,63 @@ if __name__ == "__main__":
     print(f"After dropping empty documents, we have {len(final_documents)} articles.\n")
 
     alpha = 0.001 # Set very low alpha for more distinct topics, since we have strong seed guidance and want to encourage focused topics.
-    eta = 0.001
+    eta = 0.01
     min_cf = 5
     tw = tp.TermWeight.PMI
 
     top_n = 25
 
     seed_weight = 10.0
-    regular_weight = 1
+    regular_weight = 0
     topic_name_to_id = {name: i for i, name in enumerate(seed_lexicon.keys())}
     topic_id_to_name = {i: name for name, i in topic_name_to_id.items()}
 
     ll_trace = []
     total_iterations = 8000
 
+    # --- helper: train one model at fixed k ---------------------------------
+    def _train_model(seed, verbose=True):
+        m = tp.LDAModel(k=k, alpha=alpha, eta=eta, min_cf=min_cf, tw=tw, seed=seed)
+        for doc in final_documents:
+            m.add_doc(doc)
+        m = set_seeded_prior(m, seed_lexicon, topic_name_to_id=topic_name_to_id,
+                             seed_weight=seed_weight, regular_weight=regular_weight,
+                             verbose=verbose)
+        m.train(0)
+        if verbose:
+            sample_interval, print_interval = 50, 500
+            with tqdm(total=total_iterations, desc="Gibbs Sampling") as pbar:
+                for i in range(0, total_iterations, sample_interval):
+                    m.train(sample_interval)
+                    if (i + sample_interval) % print_interval == 0:
+                        ll_trace.append(m.ll_per_word)
+                        tqdm.write(f"Iteration: {i + sample_interval}\tLog-likelihood: {m.ll_per_word:.4f}")
+                    pbar.update(sample_interval)
+        else:
+            m.train(total_iterations)
+        return m
+
+    def _best_of_seeds(k_val, n, label=""):
+        seeds = [RANDOM_SEED + i for i in range(n)]
+        print(f"\nTraining {n} models (K={k_val}{label}), keeping best by C_V coherence...")
+        best_model, best_score, seed_results = None, -np.inf, []
+        for seed in seeds:
+            tqdm.write(f"  seed={seed} ...", end=" ")
+            m = _train_model(seed, verbose=False)
+            coh_eval = tp.coherence.Coherence(m, coherence="c_v", top_n=top_n)
+            score = float(np.mean([coh_eval.get_score(topic_id=i) for i in range(m.k)]))
+            seed_results.append((seed, score))
+            tqdm.write(f"C_V = {score:.4f}")
+            if score > best_score:
+                best_score, best_model = score, m
+        best_seed = seed_results[int(np.argmax([r[1] for r in seed_results]))][0]
+        print(f"Best seed: {best_seed}  (C_V = {best_score:.4f})")
+        for seed, score in seed_results:
+            marker = " <--" if seed == best_seed else ""
+            print(f"  seed={seed}  coherence={score:.4f}{marker}")
+        return best_model
+
+    # --- step 1: find K (optional) ------------------------------------------
     if run_k_search:
         k_range = range(50, 251, 25)
         k, model, k_search_results = find_best_k(
@@ -192,35 +238,17 @@ if __name__ == "__main__":
             country_name=country_name,
             random_seed=RANDOM_SEED,
         )
-        print(f"\nReusing K={k} model from K search.")
+        print(f"\nK search selected K={k}.")
     else:
-        k = 20
-        model = tp.LDAModel(k=k, alpha=alpha, eta=eta, min_cf=min_cf, tw=tw, seed=RANDOM_SEED)
+        k = 50
+
+    # --- step 2: train at chosen K (single seed or best-of-N) ---------------
+    if n_seeds > 1:
+        model = _best_of_seeds(k, n_seeds, label=", from k-search" if run_k_search else "")
+    elif not run_k_search:
         print(f"Adding {len(final_documents)} documents to the model...")
-        for doc in final_documents:
-            model.add_doc(doc)
-        model = set_seeded_prior(model, seed_lexicon, topic_name_to_id=topic_name_to_id,
-                                 seed_weight=seed_weight, regular_weight=regular_weight)
-
-        total_iterations = 8000
-        sample_interval = 50
-        print_interval = 500
-
-        print(f"Training for {total_iterations} iterations...")
-        model.train(0)
-
-        with tqdm(total=total_iterations, desc="Gibbs Sampling") as pbar:
-            for i in range(0, total_iterations, sample_interval):
-                model.train(sample_interval)
-
-                if (i + sample_interval) % print_interval == 0:
-                    current_ll = model.ll_per_word
-                    ll_trace.append(current_ll)
-                    tqdm.write(f"Iteration: {i + sample_interval}\tLog-likelihood: {current_ll:.4f}")
-
-                pbar.update(sample_interval)
-
-        print("Training complete!")
+        model = _train_model(RANDOM_SEED, verbose=True)
+    # else: k-search already produced a trained model — use it directly
 
     print(f"Model perplexity: {model.perplexity:.4f}")
 

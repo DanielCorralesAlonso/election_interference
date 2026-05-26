@@ -52,11 +52,17 @@ def plot_topic_evolution(
 
     # Build topic distributions filtered to articles present in df_w_texts.
     # mdl.docs may be a MultiChainSummary (averaged) or a raw tomotopy model.
+    # Iterate via enumerate rather than integer subscripting: tomotopy's DocList
+    # len() includes documents whose tokens were all filtered by min_cf, but
+    # direct indexing into those positions raises IndexError.
     valid_indices = set(df_w_texts.index)
-    for idx in range(len(mdl.docs)):
+    for idx, doc in enumerate(mdl.docs):
         if idx not in valid_indices:
             continue
-        dist = mdl.docs[idx].get_topic_dist()
+        try:
+            dist = doc.get_topic_dist()
+        except (IndexError, Exception):
+            continue
         row_data = {'Original_Index': idx}
         for k_id, prob in enumerate(dist):
             row_data[f'Topic_{k_id}'] = prob
@@ -99,9 +105,13 @@ def plot_topic_evolution(
 
     topic_cols = [col for col in df_final.columns if col.startswith('Topic_')]
 
-    # Group by day and compute mean topic probability for each day.
-    # Fill missing days with zeros so plots remain continuous when no articles were published.
-    smoothed_trends = df_final[topic_cols].resample('W').mean().fillna(0)
+    # Compute weekly mean, std, and count per topic.
+    # SE = std / sqrt(n) gives uncertainty bands that widen naturally for thin weeks.
+    weekly_mean  = df_final[topic_cols].resample('W').mean()
+    weekly_std   = df_final[topic_cols].resample('W').std()
+    weekly_count = df_final[topic_cols].resample('W').count()
+    weekly_se    = weekly_std / weekly_count.pow(0.5)
+    smoothed_trends = weekly_mean.fillna(0)
 
     # ==========================================
     # 3.5 SPIKE DETECTION & EXPORT
@@ -190,18 +200,14 @@ def plot_topic_evolution(
     ]
 
     for i, k_id in enumerate(topics_to_plot):
-        # Get the human-readable label
         label = topic_id_to_name.get(k_id, f"Topic {k_id}")
-        
-        # Plot the smoothed line
-        # Multiply by 100 to convert decimals to percentages (e.g., 0.25 -> 25%)
-        plt.plot(
-            smoothed_trends.index, 
-            smoothed_trends[f'Topic_{k_id}'] * 100, 
-            label=label, 
-            linewidth=3,
-            color=colors[i % len(colors)]
-        )
+        col   = f'Topic_{k_id}'
+        mean  = smoothed_trends[col] * 100
+        se    = weekly_se[col].fillna(0) * 100
+        color = colors[i % len(colors)]
+
+        plt.plot(smoothed_trends.index, mean, label=label, linewidth=3, color=color)
+        plt.fill_between(smoothed_trends.index, mean - 2*se, mean +  2*se, alpha=0.15, color=color)
 
     # Format the Graph visually
     plt.title(f"Evolution of political narratives in the news - {country_name}", fontsize=18, fontweight='bold', pad=20)
@@ -215,11 +221,20 @@ def plot_topic_evolution(
 
     # Add a grid, legend, and layout
     plt.grid(True, linestyle='--', alpha=0.6)
-    plt.legend(title="Seeded Topics", fontsize=11, title_fontsize=12, loc='upper left')
+    plt.legend(
+        title="Topics",
+        fontsize=10,
+        title_fontsize=11,
+        loc='upper center',
+        bbox_to_anchor=(0.5, -0.22),
+        ncol=len(topics_to_plot),
+        frameon=True,
+    )
     plt.tight_layout()
+    plt.subplots_adjust(bottom=0.28)
 
     # Save or display the plot
-    plt.savefig(os.path.join(output_dir, f"topic_evolution_{country_name}.png"), dpi=300)
+    plt.savefig(os.path.join(output_dir, f"topic_evolution_{country_name}.png"), dpi=300, bbox_inches='tight')
     plt.close()
 
     # ==========================================
@@ -259,9 +274,18 @@ def plot_topic_evolution(
     plt.gca().xaxis.set_major_locator(mdates.MonthLocator(interval=1))
     plt.xticks(rotation=45)
     plt.grid(True, linestyle='--', alpha=0.6)
-    plt.legend(title="Seeded Topics", fontsize=11, title_fontsize=12, loc='upper left')
+    plt.legend(
+        title="Topics",
+        fontsize=10,
+        title_fontsize=11,
+        loc='upper center',
+        bbox_to_anchor=(0.5, -0.22),
+        ncol=len(topics_to_plot),
+        frameon=True,
+    )
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, f"topic_prominence_{country_name}.png"), dpi=300)
+    plt.subplots_adjust(bottom=0.28)
+    plt.savefig(os.path.join(output_dir, f"topic_prominence_{country_name}.png"), dpi=300, bbox_inches='tight')
     plt.close()
 
 
@@ -350,8 +374,12 @@ def plot_topic_evolution_comparison(
             return None
         df_final.set_index("Event_Date", inplace=True)
 
-        topic_cols = [col for col in df_final.columns if col.startswith("Topic_")]
-        return df_final[topic_cols].resample("W").mean().fillna(0)
+        topic_cols   = [col for col in df_final.columns if col.startswith("Topic_")]
+        weekly_mean  = df_final[topic_cols].resample("W").mean()
+        weekly_std   = df_final[topic_cols].resample("W").std()
+        weekly_count = df_final[topic_cols].resample("W").count()
+        weekly_se    = (weekly_std / weekly_count.pow(0.5)).fillna(0)
+        return weekly_mean.fillna(0), weekly_se
 
     country_frames = []
     if "Country" not in df_w_texts.columns:
@@ -363,10 +391,13 @@ def plot_topic_evolution_comparison(
         country_df = df_w_texts[mask]
         if country_df.empty:
             continue
-        trends = build_smoothed_trends(country_df)
-        if trends is None or trends.empty:
+        result = build_smoothed_trends(country_df)
+        if result is None:
             continue
-        country_frames.append((country, trends))
+        trends, se = result
+        if trends.empty:
+            continue
+        country_frames.append((country, trends, se))
 
     if not country_frames:
         print("Warning: no matching country rows found for the comparison plot. Skipping.")
@@ -377,7 +408,7 @@ def plot_topic_evolution_comparison(
         '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf',
     ]
     all_values = []
-    for _, trends in country_frames:
+    for _, trends, _ in country_frames:
         for k_id in topics_to_plot:
             col = f"Topic_{k_id}"
             if col in trends.columns:
@@ -394,19 +425,17 @@ def plot_topic_evolution_comparison(
     if len(country_frames) == 1:
         axes = [axes]
 
-    for ax, (country, trends) in zip(axes, country_frames):
+    for ax, (country, trends, se) in zip(axes, country_frames):
         for i, k_id in enumerate(topics_to_plot):
             col = f"Topic_{k_id}"
             if col not in trends.columns:
                 continue
             label = topic_id_to_name.get(k_id, f"Topic {k_id}")
-            ax.plot(
-                trends.index,
-                trends[col] * 100,
-                label=label,
-                linewidth=2.5,
-                color=colors[i % len(colors)],
-            )
+            color = colors[i % len(colors)]
+            mean_vals = trends[col] * 100
+            se_vals   = se[col] * 100
+            ax.plot(trends.index, mean_vals, label=label, linewidth=2.5, color=color)
+            ax.fill_between(trends.index, mean_vals - 2*se_vals, mean_vals + 2*se_vals, alpha=0.15, color=color)
         ax.set_title(country, fontsize=13, fontweight="bold")
         ax.set_ylabel("Topic share (%)", fontsize=11)
         ax.grid(True, linestyle="--", alpha=0.5)
@@ -419,10 +448,21 @@ def plot_topic_evolution_comparison(
 
     handles, labels = axes[0].get_legend_handles_labels()
     if handles:
-        fig.legend(handles, labels, title="Seeded Topics", loc="upper right", bbox_to_anchor=(0.98, 0.98))
+        fig.legend(
+            handles, labels,
+            title="Topics",
+            fontsize=10,
+            title_fontsize=11,
+            loc='upper center',
+            bbox_to_anchor=(0.5, -0.35),
+            bbox_transform=axes[-1].transAxes,
+            ncol=len(handles),
+            frameon=True,
+        )
 
-    fig.suptitle("Topic evolution comparison: Russia, China, and Iran", fontsize=16, fontweight="bold", y=0.995)
-    fig.tight_layout(rect=[0, 0, 0.92, 0.98])
+    fig.suptitle("Topic evolution comparison: Russia, China, and Iran", fontsize=16, fontweight="bold")
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    fig.subplots_adjust(bottom=0.18)
     output_path = os.path.join(output_dir, filename)
     fig.savefig(output_path, dpi=300, bbox_inches="tight")
     print(f"Saved comparison topic evolution plot to {output_path}")
