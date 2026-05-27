@@ -28,6 +28,7 @@ def train_lda_models(
     model_kwargs=None,
     seeds: Sequence[int] = None,
     n_workers: int = 1,
+    n_train_workers: int = 0,
 ) -> List[tp.LDAModel]:
     """Train an ensemble of LDA models on the same corpus with different random seeds."""
     model_kwargs = model_kwargs or {}
@@ -46,9 +47,9 @@ def train_lda_models(
     def _train_one(idx_seed):
         idx, seed = idx_seed
         m = tp.LDAModel(k=k, corpus=corpus, seed=seed, **model_kwargs)
-        m.train(0)
+        m.train(0, workers=n_train_workers)
         for _ in range(0, train_iters, chunk_size):
-            m.train(chunk_size)
+            m.train(chunk_size, workers=n_train_workers)
         return idx, m
 
     print(f"Training {n_models} ensemble models "
@@ -157,6 +158,7 @@ def run_topic_stability_pipeline(
     seeded_topic_names: Optional[Dict[int, str]] = None,
     ensemble_models: Optional[list] = None,
     n_workers: int = 1,
+    n_train_workers: int = 0,
 ) -> Tuple[List[float], dict]:
     """Run stability analysis using reference_model as the reference (if provided).
 
@@ -175,11 +177,11 @@ def run_topic_stability_pipeline(
         to_train = max(0, n_models - 1)
         if to_train > 0:
             print(f"Reference model provided. Training {to_train} additional ensemble models.")
-            other_models = train_lda_models(docs, n_models=to_train, k=k, model_kwargs=model_kwargs, seeds=seeds, n_workers=n_workers)
+            other_models = train_lda_models(docs, n_models=to_train, k=k, model_kwargs=model_kwargs, seeds=seeds, n_workers=n_workers, n_train_workers=n_train_workers)
             models.extend(other_models)
     else:
         print(f"No reference provided. Training {n_models} models from scratch (Model 0 will be reference).")
-        models = train_lda_models(docs, n_models=n_models, k=k, model_kwargs=model_kwargs, seeds=seeds, n_workers=n_workers)
+        models = train_lda_models(docs, n_models=n_models, k=k, model_kwargs=model_kwargs, seeds=seeds, n_workers=n_workers, n_train_workers=n_train_workers)
 
     # Extract sets and lists
     all_sets, all_lists = extract_top_word_sets_and_lists(models, top_n=top_n)

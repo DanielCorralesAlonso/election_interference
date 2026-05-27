@@ -184,7 +184,7 @@ def print_topic_overview(mdl, topic_id_to_name, output_dir="output", country_nam
 
 
 
-def print_document_topics(mdl, df_w_texts, topic_id_to_name, doc_index=0, output_dir="output", country_name=""):
+def print_document_topics(mdl, df_w_texts, topic_id_to_name, doc_index=0, output_dir="output", country_name="", seed_lexicon=None):
     os.makedirs(output_dir, exist_ok=True)
     filepath = os.path.join(output_dir, f"document_topics_{doc_index}_{country_name}.txt")
     latex_filepath = os.path.join(output_dir, f"document_topics_{doc_index}_{country_name}.tex")
@@ -207,24 +207,12 @@ def print_document_topics(mdl, df_w_texts, topic_id_to_name, doc_index=0, output
         doc_text = df_w_texts['Full_Text'].iloc[doc_index][:200]
         f.write(f"Original Text snippet: {doc_text}...\n\n")
 
-        # 3. Loop through the distribution and write the results clearly
-        for topic_id, probability in enumerate(topic_dist):
-            
-            # We only want to write topics that actually have a meaningful presence in the document.
-            # Let's ignore any topic that makes up less than 5% of the article.
-            if probability > 0.05: 
-                
-                # Look up the human-readable name if it's a seeded topic
+        # 3. Loop through the distribution sorted by probability descending
+        for topic_id, probability in sorted(enumerate(topic_dist), key=lambda x: x[1], reverse=True):
                 topic_name = topic_id_to_name.get(topic_id, f"Unseeded Topic {topic_id}")
-                
-                # Convert the decimal probability to a clean percentage
                 percentage = probability * 100
-                
-                # Write the Topic Name and its Percentage
                 f.write(f"{topic_name}: {percentage:.1f}%\n")
-                
-                # Write the top 5 words of that topic so you know what it represents
-                top_words = [word for word, prob in mdl.get_topic_words(topic_id, top_n=5)]
+                top_words = [word for word, _ in mdl.get_topic_words(topic_id, top_n=5)]
                 f.write(f"   Keywords: {', '.join(top_words)}\n\n")
                 
                 # 4. Add LaTeX row data
@@ -243,6 +231,53 @@ def print_document_topics(mdl, df_w_texts, topic_id_to_name, doc_index=0, output
         column_format="lrp{8cm}",
     )
 
+
+def print_document_topics_by_country(mdl, df_w_texts, topic_id_to_name, output_dir="output", country_name="", seed_lexicon=None):
+    """Write one example document per country with its topic distribution."""
+    os.makedirs(output_dir, exist_ok=True)
+    filepath = os.path.join(output_dir, f"document_topics_by_country_{country_name}.txt")
+    latex_filepath = os.path.join(output_dir, f"document_topics_by_country_{country_name}.tex")
+
+    docs_list = list(mdl.docs)
+    all_latex_rows = []
+
+    with open(filepath, 'w', encoding="utf-8") as f:
+        for country in sorted(df_w_texts['Country'].unique()):
+            country_indices = df_w_texts.index[df_w_texts['Country'] == country].tolist()
+            if not country_indices:
+                continue
+            idx = country_indices[0]
+
+            f.write(f"{'=' * 60}\n")
+            f.write(f"  {country}  (document index {idx})\n")
+            f.write(f"{'=' * 60}\n\n")
+
+            doc_text = df_w_texts['Full_Text'].iloc[idx][:200]
+            f.write(f"Text snippet: {doc_text}...\n\n")
+
+            topic_dist = docs_list[idx].get_topic_dist()
+            for topic_id, probability in sorted(enumerate(topic_dist), key=lambda x: x[1], reverse=True):
+                topic_name = topic_id_to_name.get(topic_id, f"Unseeded Topic {topic_id}")
+                percentage = probability * 100
+                f.write(f"{topic_name}: {percentage:.1f}%\n")
+                top_words = [word for word, _ in mdl.get_topic_words(topic_id, top_n=5)]
+                f.write(f"   Keywords: {', '.join(top_words)}\n\n")
+                all_latex_rows.append({
+                    "Country": escape_latex(country),
+                    "Topic Name": escape_latex(topic_name),
+                    "Percentage": f"{percentage:.1f}\\%",
+                    "Keywords": escape_latex(', '.join(top_words)),
+                })
+            f.write("\n")
+
+    latex_df = pd.DataFrame(all_latex_rows, columns=["Country", "Topic Name", "Percentage", "Keywords"])
+    write_latex_table(
+        latex_df,
+        latex_filepath,
+        caption="Example Document Topic Distribution by Country" + (f" - {country_name}" if country_name else ""),
+        label=f"tab:document_topics_by_country_{country_name}",
+        column_format="llrp{7cm}",
+    )
 
 
 

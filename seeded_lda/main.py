@@ -10,7 +10,7 @@ from webscrapping import webscrape_articles
 from text_preprocessing import clean_scraped_text, detect_languages_in_texts, preprocess_pipeline, collect_seed_term_candidates, report_seed_coverage
 from config import custom_words_to_remove, seed_lexicon
 from set_seeded_prior import set_seeded_prior
-from utils import print_topic_overview, print_document_topics, print_corpus_topic_distribution, print_topic_coherence
+from utils import print_topic_overview, print_document_topics, print_document_topics_by_country, print_corpus_topic_distribution, print_topic_coherence
 from plot import plot_topic_evolution, plot_topic_evolution_comparison, plot_document_length_distribution, plot_document_entropy_by_country
 from topic_stability_analysis import run_topic_stability_pipeline
 from find_best_k import find_best_k
@@ -35,6 +35,8 @@ if __name__ == "__main__":
     n_posterior_samples   = int(posterior_samples_arg.split("=")[1]) if posterior_samples_arg and "=" in posterior_samples_arg else 0
     workers_arg           = next((a for a in os.sys.argv[1:] if a.startswith("--workers")), None)
     n_workers             = int(workers_arg.split("=")[1]) if workers_arg and "=" in workers_arg else 1
+    train_workers_arg     = next((a for a in os.sys.argv[1:] if a.startswith("--train-workers")), None)
+    n_train_workers       = int(train_workers_arg.split("=")[1]) if train_workers_arg and "=" in train_workers_arg else 0
     positional_args       = [a for a in os.sys.argv[1:] if not a.startswith("--")]
     country_name          = positional_args[0] if positional_args else "all"
 
@@ -153,12 +155,17 @@ if __name__ == "__main__":
         df_cache.to_parquet(df_cache_path, index=True)
         print(f"Preprocessing cache saved to {preprocess_cache_dir}\n")
 
-    # Drop articles whose token list is empty after preprocessing so df_w_texts
-    # and the tomotopy model stay aligned 1:1.
-    non_empty = [bool(doc) for doc in final_documents]
-    df_w_texts = df_w_texts[non_empty].reset_index(drop=True)
-    final_documents = [doc for doc, keep in zip(final_documents, non_empty) if keep]
-    print(f"After dropping empty documents, we have {len(final_documents)} articles.\n")
+    # Drop articles with too few tokens after preprocessing — these are scraping/
+    # preprocessing artefacts, not real news articles.
+    MIN_TOKENS = 5
+    sufficient = [len(doc) >= MIN_TOKENS for doc in final_documents]
+    n_dropped = len(final_documents) - sum(sufficient)
+    if n_dropped:
+        print(f"Dropping {n_dropped} document(s) with fewer than {MIN_TOKENS} tokens "
+              f"(lengths: {sorted(len(d) for d, ok in zip(final_documents, sufficient) if not ok)}).")
+    df_w_texts = df_w_texts[sufficient].reset_index(drop=True)
+    final_documents = [doc for doc, keep in zip(final_documents, sufficient) if keep]
+    print(f"After dropping short documents, we have {len(final_documents)} articles.\n")
 
     # --- corpus diagnostics -------------------------------------------------
     doc_lengths = [len(doc) for doc in final_documents]
@@ -179,11 +186,11 @@ if __name__ == "__main__":
     print()
     # -------------------------------------------------------------------------
 
-    k = 40
-    alpha = 50/k
+    k = 30
+    alpha = 0.000001
     eta = 0.01
     min_cf = 0  # Vocabulary already filtered by min_df in preprocessing (with seed protection); tomotopy adds no second filter.
-    tw = tp.TermWeight.IDF  #PMI
+    tw = tp.TermWeight.PMI  #PMI
 
     top_n = 20
 
@@ -202,17 +209,17 @@ if __name__ == "__main__":
         m = set_seeded_prior(m, seed_lexicon, topic_name_to_id=topic_name_to_id,
                              seed_weight=seed_weight, regular_weight=regular_weight,
                              verbose=verbose)
-        m.train(0)
+        m.train(0, workers=n_train_workers)
         if verbose:
             sample_interval, print_interval = 50, 500
             with tqdm(total=total_iterations, desc="Gibbs Sampling") as pbar:
                 for i in range(0, total_iterations, sample_interval):
-                    m.train(sample_interval)
+                    m.train(sample_interval, workers=n_train_workers)
                     if (i + sample_interval) % print_interval == 0:
                         tqdm.write(f"Iteration: {i + sample_interval}\tLog-likelihood: {m.ll_per_word:.4f}")
                     pbar.update(sample_interval)
         else:
-            m.train(total_iterations)
+            m.train(total_iterations, workers=n_train_workers)
         return m
 
     def _best_of_seeds(k_val, n, label="", n_workers=1):
@@ -273,6 +280,7 @@ if __name__ == "__main__":
             country_name=country_name,
             random_seed=RANDOM_SEED,
             n_workers=n_workers,
+            n_train_workers=n_train_workers,
         )
         print(f"\nK search selected K={k}.")
     else:
@@ -296,7 +304,7 @@ if __name__ == "__main__":
         print(f"\nCollecting {n_posterior_samples} thinned posterior samples (200 iter/sample)...")
         theta_list = []
         for _ in tqdm(range(n_posterior_samples), desc="Posterior sampling"):
-            model.train(200)
+            model.train(200, workers=n_train_workers)
             theta_list.append(np.array([doc.get_topic_dist() for doc in model.docs]))
         theta_samples = np.stack(theta_list)  # (n_samples, n_docs, K)
         print(f"Posterior samples collected: shape {theta_samples.shape}")
@@ -306,7 +314,9 @@ if __name__ == "__main__":
     print_topic_coherence(mdl, coh, topic_id_to_name, output_dir="output", country_name=country_name, coherence_measure=coherence_measure, top_n=top_n)
 
     print_topic_overview(mdl, topic_id_to_name=topic_id_to_name, output_dir="output", country_name=country_name)
-    print_document_topics(mdl, df_w_texts, topic_id_to_name=topic_id_to_name, doc_index=0, output_dir="output", country_name=country_name)
+    print_document_topics(mdl, df_w_texts, topic_id_to_name=topic_id_to_name, doc_index=0, output_dir="output", country_name=country_name, seed_lexicon=seed_lexicon)
+    if 'Country' in df_w_texts.columns:
+        print_document_topics_by_country(mdl, df_w_texts, topic_id_to_name=topic_id_to_name, output_dir="output", country_name=country_name, seed_lexicon=seed_lexicon)
     print_corpus_topic_distribution(mdl, topic_id_to_name=topic_id_to_name, output_dir="output", country_name=country_name)
 
     plot_document_entropy_by_country(mdl, df_w_texts, output_dir="output", country_name=country_name)
@@ -331,6 +341,11 @@ if __name__ == "__main__":
                 theta_samples=theta_samples,
                 show_prominence=show_prominence,
             )
+            # Generate document topics using the common model, first doc from this country
+            country_doc_idx = country_df.index[0]
+            print_document_topics(mdl, df_w_texts, topic_id_to_name=topic_id_to_name,
+                                  doc_index=country_doc_idx, output_dir="output",
+                                  country_name=f"all_{country}", seed_lexicon=seed_lexicon)
 
         plot_topic_evolution_comparison(
             mdl,
@@ -341,6 +356,7 @@ if __name__ == "__main__":
             countries=("Russia", "China", "Iran"),
             theta_samples=theta_samples,
         )
+
 
     if run_stability:
         run_topic_stability_pipeline(
@@ -356,6 +372,7 @@ if __name__ == "__main__":
             seeded_topic_names=topic_id_to_name,
             ensemble_models=ensemble_models,
             n_workers=n_workers,
+            n_train_workers=n_train_workers,
         )
 
 

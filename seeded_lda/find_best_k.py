@@ -32,7 +32,7 @@ def find_best_k(documents, k_values, alpha=0.2, eta=0.001, min_cf=5,
                 use_diversity=True, diversity_top_n=25,
                 seed_lexicon=None, seed_weight=10.0, regular_weight=0.001,
                 output_dir="output", country_name="all", random_seed=None,
-                n_workers=1):
+                n_workers=1, n_train_workers=0):
     """
     Train LDA models over a range of K values and select the best K by the
     elbow of the C_V coherence curve (Röder et al. 2015).
@@ -70,7 +70,7 @@ def find_best_k(documents, k_values, alpha=0.2, eta=0.001, min_cf=5,
             set_seeded_prior(m, seed_lexicon, topic_name_to_id,
                              seed_weight=seed_weight, regular_weight=regular_weight,
                              verbose=False)
-        m.train(n_iterations)
+        m.train(n_iterations, workers=n_train_workers)
         coh_eval = tp.coherence.Coherence(m, coherence=coherence_measure, top_n=top_n)
         avg_coh = float(np.mean([coh_eval.get_score(topic_id=i) for i in range(m.k)]))
         div = _topic_diversity(m, top_n=diversity_top_n) if use_diversity else None
