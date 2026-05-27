@@ -387,3 +387,17 @@ def print_topic_coherence(mdl, coh, topic_id_to_name, output_dir="output", count
         label="tab:topic_coherence" + (f"_{country_name}" if country_name else ""),
         column_format="lrp{9cm}",
     )
+
+    seeded_ids = set(topic_id_to_name.keys())
+    seeded_scores   = [s for s, _, _, k_id, _ in topic_coherence if k_id in seeded_ids]
+    unseeded_scores = [s for s, _, _, k_id, _ in topic_coherence if k_id not in seeded_ids]
+
+    print(f"\n{'='*50}")
+    print(f"  C_V COHERENCE SUMMARY  [{coherence_measure.upper()}, top-{top_n}]  |  {country_name}")
+    print(f"{'='*50}")
+    print(f"  All topics   (K={mdl.k}):         {avg_score:.4f}")
+    if seeded_scores:
+        print(f"  Seeded topics  (n={len(seeded_scores)}):        {sum(seeded_scores)/len(seeded_scores):.4f}")
+    if unseeded_scores:
+        print(f"  Unseeded topics (n={len(unseeded_scores)}):       {sum(unseeded_scores)/len(unseeded_scores):.4f}")
+    print(f"{'='*50}\n")

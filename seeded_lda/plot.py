@@ -17,6 +17,40 @@ plt.rcParams.update({
 
 
 
+def _posterior_weekly_std(theta_samples, df_w_texts, weekly_index):
+    """
+    Compute posterior std of the weekly mean topic probability from thinned
+    MCMC samples.
+
+    theta_samples : np.ndarray (n_samples, n_docs, K)
+    df_w_texts    : DataFrame with 'Event_Date' column and index aligned to n_docs
+    weekly_index  : DatetimeIndex of weekly bins (from the main resample call)
+
+    Returns a DataFrame (n_weeks, K) of posterior std values, aligned to weekly_index.
+    """
+    n_samples, n_docs, K = theta_samples.shape
+    valid_indices = list(df_w_texts.index)
+    topic_cols = [f'Topic_{k}' for k in range(K)]
+
+    sample_means = []
+    for s in range(n_samples):
+        rows = [
+            {'Original_Index': idx,
+             **{f'Topic_{k}': theta_samples[s, idx, k] for k in range(K)}}
+            for idx in valid_indices if idx < n_docs
+        ]
+        df_s = pd.DataFrame(rows)
+        df_m = df_w_texts[['Event_Date']].merge(df_s, left_index=True, right_on='Original_Index')
+        df_m['Event_Date'] = pd.to_datetime(df_m['Event_Date'].astype(str), format='%Y%m%d', errors='coerce')
+        df_m = df_m.dropna(subset=['Event_Date']).set_index('Event_Date')
+        wm = df_m[topic_cols].resample('W').mean().reindex(weekly_index).fillna(0)
+        sample_means.append(wm.values)
+
+    stacked = np.stack(sample_means, axis=0)          # (n_samples, n_weeks, K)
+    std_vals = stacked.std(axis=0)                     # (n_weeks, K)
+    return pd.DataFrame(std_vals, index=weekly_index, columns=topic_cols)
+
+
 def plot_topic_evolution(
     mdl,
     df_w_texts,
@@ -25,6 +59,8 @@ def plot_topic_evolution(
     country_name="",
     topics_to_plot=None,
     top_n_prominence=5,
+    theta_samples=None,
+    show_prominence=False,
 ):
     print("Extracting topic distributions...")
 
@@ -105,13 +141,17 @@ def plot_topic_evolution(
 
     topic_cols = [col for col in df_final.columns if col.startswith('Topic_')]
 
-    # Compute weekly mean, std, and count per topic.
-    # SE = std / sqrt(n) gives uncertainty bands that widen naturally for thin weeks.
-    weekly_mean  = df_final[topic_cols].resample('W').mean()
-    weekly_std   = df_final[topic_cols].resample('W').std()
-    weekly_count = df_final[topic_cols].resample('W').count()
-    weekly_se    = weekly_std / weekly_count.pow(0.5)
+    weekly_mean     = df_final[topic_cols].resample('W').mean()
     smoothed_trends = weekly_mean.fillna(0)
+
+    if theta_samples is not None:
+        weekly_uncertainty = _posterior_weekly_std(theta_samples, df_w_texts, smoothed_trends.index)
+        uncertainty_label  = "±2 posterior std"
+    else:
+        weekly_std         = df_final[topic_cols].resample('W').std()
+        weekly_count       = df_final[topic_cols].resample('W').count()
+        weekly_uncertainty = weekly_std / weekly_count.pow(0.5)
+        uncertainty_label  = "±2 SE"
 
     # ==========================================
     # 3.5 SPIKE DETECTION & EXPORT
@@ -203,11 +243,12 @@ def plot_topic_evolution(
         label = topic_id_to_name.get(k_id, f"Topic {k_id}")
         col   = f'Topic_{k_id}'
         mean  = smoothed_trends[col] * 100
-        se    = weekly_se[col].fillna(0) * 100
+        unc   = weekly_uncertainty[col].fillna(0) * 100 if col in weekly_uncertainty.columns else None
         color = colors[i % len(colors)]
 
         plt.plot(smoothed_trends.index, mean, label=label, linewidth=3, color=color)
-        plt.fill_between(smoothed_trends.index, mean - 2*se, mean +  2*se, alpha=0.15, color=color)
+        if unc is not None:
+            plt.fill_between(smoothed_trends.index, mean - 2*unc, mean + 2*unc, alpha=0.15, color=color)
 
     # Format the Graph visually
     plt.title(f"Evolution of political narratives in the news - {country_name}", fontsize=18, fontweight='bold', pad=20)
@@ -238,8 +279,11 @@ def plot_topic_evolution(
     plt.close()
 
     # ==========================================
-    # 5. PROMINENCE PLOT (top-N binary)
+    # 5. PROMINENCE PLOT (top-N binary) — optional
     # ==========================================
+    if not show_prominence:
+        return
+
     df_prom_final = df_w_texts[['Event_Date']].merge(
         df_article_prominence,
         left_index=True,
@@ -290,6 +334,86 @@ def plot_topic_evolution(
 
 
 
+def plot_document_entropy_by_country(mdl, df_w_texts, output_dir="output", country_name="all"):
+    """
+    Compute the normalised Shannon entropy of each document's topic distribution
+    and compare distributions across countries via violin + strip plots.
+
+    Normalised entropy = H(theta_d) / log(K), where H = -sum(p * log(p)).
+    A value of 1.0 = perfectly uniform across all K topics (maximally diffuse).
+    A value near 0  = near-deterministic (one topic dominates).
+
+    Saves both a plot and a CSV of per-country summary statistics.
+    """
+    import seaborn as sns
+
+    os.makedirs(output_dir, exist_ok=True)
+    K = mdl.k
+    log_K = np.log(K)
+
+    valid_indices = set(df_w_texts.index)
+    rows = []
+    for idx, doc in enumerate(mdl.docs):
+        if idx not in valid_indices:
+            continue
+        try:
+            theta = np.array(doc.get_topic_dist())
+        except Exception:
+            continue
+        theta = np.clip(theta, 1e-12, 1.0)
+        entropy = -float(np.sum(theta * np.log(theta)))
+        norm_entropy = entropy / log_K
+        rows.append({"Original_Index": idx, "Entropy": entropy, "Norm_Entropy": norm_entropy})
+
+    df_ent = pd.DataFrame(rows)
+
+    if "Country" in df_w_texts.columns:
+        df_ent = df_ent.merge(
+            df_w_texts[["Country"]].reset_index().rename(columns={"index": "Original_Index"}),
+            on="Original_Index",
+            how="left",
+        )
+        group_col = "Country"
+    else:
+        df_ent["Country"] = country_name
+        group_col = "Country"
+
+    # Summary statistics
+    summary = df_ent.groupby(group_col)["Norm_Entropy"].describe(percentiles=[0.25, 0.5, 0.75])
+    summary_path = os.path.join(output_dir, f"entropy_by_country_{country_name}.csv")
+    summary.to_csv(summary_path)
+    print(f"\nDocument entropy summary (normalised, K={K}):")
+    print(summary.to_string())
+
+    # Plot
+    countries_present = df_ent[group_col].dropna().unique()
+    fig, ax = plt.subplots(figsize=(max(6, 2.5 * len(countries_present)), 6))
+
+    sns.violinplot(
+        data=df_ent, x=group_col, y="Norm_Entropy",
+        inner=None, palette="Set2", alpha=0.6, ax=ax, order=sorted(countries_present),
+    )
+    sns.stripplot(
+        data=df_ent, x=group_col, y="Norm_Entropy",
+        color="black", alpha=0.15, size=2.5, jitter=True, ax=ax, order=sorted(countries_present),
+    )
+
+    ax.axhline(1.0, color="red", linestyle="--", linewidth=1, label=f"Max entropy (uniform over {K} topics)")
+    ax.set_xlabel("Country", fontsize=13)
+    ax.set_ylabel(f"Normalised entropy  H(θ) / log({K})", fontsize=13)
+    ax.set_title("Per-document topic entropy by country\n(higher = more diffuse topic mix per article)", fontsize=14)
+    ax.legend(fontsize=10)
+    ax.set_ylim(0, 1.05)
+    plt.tight_layout()
+
+    plot_path = os.path.join(output_dir, f"entropy_by_country_{country_name}.png")
+    fig.savefig(plot_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Entropy plot saved to {plot_path}")
+
+    return df_ent
+
+
 def plot_document_length_distribution(df_w_texts, text_col, output_dir="output", country_name="", title="Document Length Distribution"):
     plt.figure(figsize=(10, 6))
     df_w_texts['Doc_Length'] = df_w_texts[text_col].apply(len)
@@ -309,6 +433,7 @@ def plot_topic_evolution_comparison(
     countries=("Russia", "China", "Iran"),
     topics_to_plot=None,
     filename="topic_evolution_russia_china_iran.png",
+    theta_samples=None,
 ):
     """Plot topic evolution for multiple countries in stacked panels with a shared y-axis."""
     os.makedirs(output_dir, exist_ok=True)
@@ -374,12 +499,17 @@ def plot_topic_evolution_comparison(
             return None
         df_final.set_index("Event_Date", inplace=True)
 
-        topic_cols   = [col for col in df_final.columns if col.startswith("Topic_")]
-        weekly_mean  = df_final[topic_cols].resample("W").mean()
-        weekly_std   = df_final[topic_cols].resample("W").std()
-        weekly_count = df_final[topic_cols].resample("W").count()
-        weekly_se    = (weekly_std / weekly_count.pow(0.5)).fillna(0)
-        return weekly_mean.fillna(0), weekly_se
+        topic_cols  = [col for col in df_final.columns if col.startswith("Topic_")]
+        weekly_mean = df_final[topic_cols].resample("W").mean().fillna(0)
+
+        if theta_samples is not None:
+            unc = _posterior_weekly_std(theta_samples, country_df, weekly_mean.index)
+        else:
+            weekly_std   = df_final[topic_cols].resample("W").std()
+            weekly_count = df_final[topic_cols].resample("W").count()
+            unc = (weekly_std / weekly_count.pow(0.5)).fillna(0)
+
+        return weekly_mean, unc
 
     country_frames = []
     if "Country" not in df_w_texts.columns:
@@ -394,10 +524,10 @@ def plot_topic_evolution_comparison(
         result = build_smoothed_trends(country_df)
         if result is None:
             continue
-        trends, se = result
+        trends, unc = result
         if trends.empty:
             continue
-        country_frames.append((country, trends, se))
+        country_frames.append((country, trends, unc))
 
     if not country_frames:
         print("Warning: no matching country rows found for the comparison plot. Skipping.")
@@ -425,17 +555,18 @@ def plot_topic_evolution_comparison(
     if len(country_frames) == 1:
         axes = [axes]
 
-    for ax, (country, trends, se) in zip(axes, country_frames):
+    for ax, (country, trends, unc) in zip(axes, country_frames):
         for i, k_id in enumerate(topics_to_plot):
             col = f"Topic_{k_id}"
             if col not in trends.columns:
                 continue
-            label = topic_id_to_name.get(k_id, f"Topic {k_id}")
-            color = colors[i % len(colors)]
+            label     = topic_id_to_name.get(k_id, f"Topic {k_id}")
+            color     = colors[i % len(colors)]
             mean_vals = trends[col] * 100
-            se_vals   = se[col] * 100
+            unc_vals  = unc[col].fillna(0) * 100 if col in unc.columns else None
             ax.plot(trends.index, mean_vals, label=label, linewidth=2.5, color=color)
-            ax.fill_between(trends.index, mean_vals - 2*se_vals, mean_vals + 2*se_vals, alpha=0.15, color=color)
+            if unc_vals is not None:
+                ax.fill_between(trends.index, mean_vals - 2*unc_vals, mean_vals + 2*unc_vals, alpha=0.15, color=color)
         ax.set_title(country, fontsize=13, fontweight="bold")
         ax.set_ylabel("Topic share (%)", fontsize=11)
         ax.grid(True, linestyle="--", alpha=0.5)

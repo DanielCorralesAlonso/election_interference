@@ -147,14 +147,22 @@ def run_topic_stability_pipeline(
     reference_model: Optional[tp.LDAModel] = None,
     reference_name: str = "reference",
     seeded_topic_names: Optional[Dict[int, str]] = None,
+    ensemble_models: Optional[list] = None,
 ) -> Tuple[List[float], dict]:
-    """Run stability analysis using reference_model as the reference (if provided)."""
+    """Run stability analysis using reference_model as the reference (if provided).
+
+    If ensemble_models is given (a list of already-trained LDAModels with the
+    reference/best model first), no additional training is performed — the
+    multi-seed run that selected the best model is reused directly.
+    """
     os.makedirs(output_dir, exist_ok=True)
     model_kwargs = model_kwargs or {}
 
-    models = []
-    if reference_model is not None:
-        models.append(reference_model)
+    if ensemble_models is not None:
+        print(f"Reusing {len(ensemble_models)} pre-trained models for stability analysis.")
+        models = ensemble_models
+    elif reference_model is not None:
+        models = [reference_model]
         to_train = max(0, n_models - 1)
         if to_train > 0:
             print(f"Reference model provided. Training {to_train} additional ensemble models.")

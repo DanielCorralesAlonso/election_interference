@@ -9,11 +9,10 @@ from webscrapping import webscrape_articles
 from text_preprocessing import clean_scraped_text, detect_languages_in_texts, preprocess_pipeline, collect_seed_term_candidates, report_seed_coverage
 from config import custom_words_to_remove, seed_lexicon
 from set_seeded_prior import set_seeded_prior
-from utils import print_topic_overview, print_document_topics, print_corpus_topic_distribution, print_topic_distinctive_tokens, print_topic_coherence
-from plot import plot_topic_evolution, plot_topic_evolution_comparison, plot_document_length_distribution
+from utils import print_topic_overview, print_document_topics, print_corpus_topic_distribution, print_topic_coherence
+from plot import plot_topic_evolution, plot_topic_evolution_comparison, plot_document_length_distribution, plot_document_entropy_by_country
 from topic_stability_analysis import run_topic_stability_pipeline
 from find_best_k import find_best_k
-from multi_chain import build_multi_chain_summary
 
 
 
@@ -26,13 +25,15 @@ if __name__ == "__main__":
     force_preprocess = "--force-preprocess" in os.sys.argv[1:]
     use_cached_df = "--use-cached-df" in os.sys.argv[1:]
     skip_preprocess = "--skip-preprocess" in os.sys.argv[1:]
-    run_k_search = "--find-best-k" in os.sys.argv[1:]
-    multi_chain_arg = next((a for a in os.sys.argv[1:] if a.startswith("--multi-chain")), None)
-    n_chains = int(multi_chain_arg.split("=")[1]) if multi_chain_arg and "=" in multi_chain_arg else 1
-    multi_seed_arg = next((a for a in os.sys.argv[1:] if a.startswith("--multi-seed")), None)
-    n_seeds = int(multi_seed_arg.split("=")[1]) if multi_seed_arg and "=" in multi_seed_arg else 1
-    positional_args = [arg for arg in os.sys.argv[1:] if not arg.startswith("--")]
-    country_name = positional_args[0] if len(positional_args) > 0 else "all"
+    run_k_search          = "--find-best-k"        in os.sys.argv[1:]
+    run_stability         = "--stability-analysis" in os.sys.argv[1:]
+    show_prominence       = "--prominence"         in os.sys.argv[1:]
+    multi_seed_arg        = next((a for a in os.sys.argv[1:] if a.startswith("--multi-seed")), None)
+    n_seeds               = int(multi_seed_arg.split("=")[1]) if multi_seed_arg and "=" in multi_seed_arg else 1
+    posterior_samples_arg = next((a for a in os.sys.argv[1:] if a.startswith("--posterior-samples")), None)
+    n_posterior_samples   = int(posterior_samples_arg.split("=")[1]) if posterior_samples_arg and "=" in posterior_samples_arg else 0
+    positional_args       = [a for a in os.sys.argv[1:] if not a.startswith("--")]
+    country_name          = positional_args[0] if positional_args else "all"
 
     preprocess_cache_dir = os.path.join("output", "preprocess_cache")
     os.makedirs(preprocess_cache_dir, exist_ok=True)
@@ -156,19 +157,38 @@ if __name__ == "__main__":
     final_documents = [doc for doc, keep in zip(final_documents, non_empty) if keep]
     print(f"After dropping empty documents, we have {len(final_documents)} articles.\n")
 
-    alpha = 0.001 # Set very low alpha for more distinct topics, since we have strong seed guidance and want to encourage focused topics.
+    # --- corpus diagnostics -------------------------------------------------
+    doc_lengths = [len(doc) for doc in final_documents]
+    total_tokens = sum(doc_lengths)
+    print(f"Corpus statistics:")
+    print(f"  Documents      : {len(final_documents)}")
+    print(f"  Total tokens   : {total_tokens:,}")
+    print(f"  Tokens/doc     : mean={np.mean(doc_lengths):.0f}  median={np.median(doc_lengths):.0f}  "
+          f"min={min(doc_lengths)}  max={max(doc_lengths)}")
+    if 'Event_Date' in df_w_texts.columns:
+        dates = pd.to_datetime(df_w_texts['Event_Date'].astype(str), format='%Y%m%d', errors='coerce').dropna()
+        weekly_counts = dates.dt.to_period('W').value_counts()
+        print(f"  Docs/week      : mean={weekly_counts.mean():.1f}  median={weekly_counts.median():.1f}  "
+              f"min={weekly_counts.min()}  max={weekly_counts.max()}")
+    if 'Country' in df_w_texts.columns:
+        print(f"  Docs by country:\n" +
+              "\n".join(f"    {c}: {n}" for c, n in df_w_texts['Country'].value_counts().items()))
+    print()
+    # -------------------------------------------------------------------------
+
+    k = 25
+    alpha = 50/k
     eta = 0.01
-    min_cf = 5
-    tw = tp.TermWeight.PMI
+    min_cf = 0  # Vocabulary already filtered by min_df in preprocessing (with seed protection); tomotopy adds no second filter.
+    tw = tp.TermWeight.IDF  #PMI
 
-    top_n = 25
+    top_n = 20
 
-    seed_weight = 10.0
-    regular_weight = 0
+    seed_weight = 1.0
+    regular_weight = 0.0
     topic_name_to_id = {name: i for i, name in enumerate(seed_lexicon.keys())}
     topic_id_to_name = {i: name for name, i in topic_name_to_id.items()}
 
-    ll_trace = []
     total_iterations = 8000
 
     # --- helper: train one model at fixed k ---------------------------------
@@ -186,7 +206,6 @@ if __name__ == "__main__":
                 for i in range(0, total_iterations, sample_interval):
                     m.train(sample_interval)
                     if (i + sample_interval) % print_interval == 0:
-                        ll_trace.append(m.ll_per_word)
                         tqdm.write(f"Iteration: {i + sample_interval}\tLog-likelihood: {m.ll_per_word:.4f}")
                     pbar.update(sample_interval)
         else:
@@ -196,10 +215,11 @@ if __name__ == "__main__":
     def _best_of_seeds(k_val, n, label=""):
         seeds = [RANDOM_SEED + i for i in range(n)]
         print(f"\nTraining {n} models (K={k_val}{label}), keeping best by C_V coherence...")
-        best_model, best_score, seed_results = None, -np.inf, []
+        all_models, best_model, best_score, seed_results = [], None, -np.inf, []
         for seed in seeds:
             tqdm.write(f"  seed={seed} ...", end=" ")
             m = _train_model(seed, verbose=False)
+            all_models.append(m)
             coh_eval = tp.coherence.Coherence(m, coherence="c_v", top_n=top_n)
             score = float(np.mean([coh_eval.get_score(topic_id=i) for i in range(m.k)]))
             seed_results.append((seed, score))
@@ -211,11 +231,13 @@ if __name__ == "__main__":
         for seed, score in seed_results:
             marker = " <--" if seed == best_seed else ""
             print(f"  seed={seed}  coherence={score:.4f}{marker}")
-        return best_model
+        # return best model first so it becomes the stability reference
+        other_models = [m for m in all_models if m is not best_model]
+        return best_model, [best_model] + other_models
 
     # --- step 1: find K (optional) ------------------------------------------
     if run_k_search:
-        k_range = range(50, 251, 25)
+        k_range = range(20, 100, 10)
         k, model, k_search_results = find_best_k(
             final_documents,
             k_values=k_range,
@@ -223,14 +245,11 @@ if __name__ == "__main__":
             eta=eta,
             min_cf=min_cf,
             tw=tw,
-            n_iterations=15000,
+            n_iterations=4000,
             coherence_measure="c_v",
             top_n=top_n,
             use_diversity=True,
-            diversity_top_n=25,
-            w_coherence=0.5,
-            w_diversity=0.3,
-            w_perplexity=0.2,
+            diversity_top_n=top_n,
             seed_lexicon=seed_lexicon,
             seed_weight=seed_weight,
             regular_weight=regular_weight,
@@ -240,35 +259,30 @@ if __name__ == "__main__":
         )
         print(f"\nK search selected K={k}.")
     else:
-        k = 50
+        k = k
 
     # --- step 2: train at chosen K (single seed or best-of-N) ---------------
+    ensemble_models = None
     if n_seeds > 1:
-        model = _best_of_seeds(k, n_seeds, label=", from k-search" if run_k_search else "")
+        model, ensemble_models = _best_of_seeds(k, n_seeds, label=", from k-search" if run_k_search else "")
     elif not run_k_search:
         print(f"Adding {len(final_documents)} documents to the model...")
         model = _train_model(RANDOM_SEED, verbose=True)
     # else: k-search already produced a trained model — use it directly
 
     print(f"Model perplexity: {model.perplexity:.4f}")
+    mdl = model
 
-    if n_chains > 1:
-        print(f"\nRunning {n_chains}-chain posterior averaging...")
-        mdl = build_multi_chain_summary(
-            reference_model=model,
-            final_documents=final_documents,
-            n_chains=n_chains,
-            base_seed=RANDOM_SEED,
-            k=k, alpha=alpha, eta=eta, min_cf=min_cf, tw=tw,
-            seed_lexicon=seed_lexicon,
-            seed_weight=seed_weight,
-            regular_weight=regular_weight,
-            total_iterations=total_iterations,
-            topic_name_to_id=topic_name_to_id,
-            set_seeded_prior_fn=set_seeded_prior,
-        )
-    else:
-        mdl = model
+    # --- optional: thinned posterior sampling --------------------------------
+    theta_samples = None
+    if n_posterior_samples > 0:
+        print(f"\nCollecting {n_posterior_samples} thinned posterior samples (200 iter/sample)...")
+        theta_list = []
+        for _ in tqdm(range(n_posterior_samples), desc="Posterior sampling"):
+            model.train(200)
+            theta_list.append(np.array([doc.get_topic_dist() for doc in model.docs]))
+        theta_samples = np.stack(theta_list)  # (n_samples, n_docs, K)
+        print(f"Posterior samples collected: shape {theta_samples.shape}")
 
     coherence_measure = "c_v"
     coh = tp.coherence.Coherence(model, coherence=coherence_measure, top_n=top_n)
@@ -277,12 +291,14 @@ if __name__ == "__main__":
     print_topic_overview(mdl, topic_id_to_name=topic_id_to_name, output_dir="output", country_name=country_name)
     print_document_topics(mdl, df_w_texts, topic_id_to_name=topic_id_to_name, doc_index=0, output_dir="output", country_name=country_name)
     print_corpus_topic_distribution(mdl, topic_id_to_name=topic_id_to_name, output_dir="output", country_name=country_name)
-    print_topic_distinctive_tokens(mdl, topic_id_to_name=topic_id_to_name, output_dir="output", country_name=country_name, top_n=5)
+
+    plot_document_entropy_by_country(mdl, df_w_texts, output_dir="output", country_name=country_name)
+
 
     _country_topic_ids = {i for name, i in topic_name_to_id.items() if name in {"russia", "china", "iran"}}
     plot_topics = [i for i in sorted(topic_id_to_name.keys()) if i not in _country_topic_ids]
 
-    plot_topic_evolution(mdl, df_w_texts=df_w_texts, topic_id_to_name=topic_id_to_name, output_dir="output", country_name=country_name, topics_to_plot=plot_topics)
+    plot_topic_evolution(mdl, df_w_texts=df_w_texts, topic_id_to_name=topic_id_to_name, output_dir="output", country_name=country_name, topics_to_plot=plot_topics, theta_samples=theta_samples, show_prominence=show_prominence)
 
     if country_name == "all":
         for country in df_w_texts['Country'].unique():
@@ -295,6 +311,8 @@ if __name__ == "__main__":
                 output_dir="output",
                 country_name=f"all_{country}",
                 topics_to_plot=plot_topics,
+                theta_samples=theta_samples,
+                show_prominence=show_prominence,
             )
 
         plot_topic_evolution_comparison(
@@ -304,11 +322,22 @@ if __name__ == "__main__":
             topics_to_plot=[i for i in plot_topics if i in topic_id_to_name],
             output_dir="output",
             countries=("Russia", "China", "Iran"),
+            theta_samples=theta_samples,
         )
 
-
-    topic_stability_analysis = False
-    if topic_stability_analysis:
-        run_topic_stability_pipeline(final_documents, n_models=10, k=k, top_n=200, model_kwargs={"alpha": alpha, "eta": eta, "min_cf": min_cf, "tw": tw}, seeds=None, output_dir="output", reference_model=model, reference_name=country_name, seeded_topic_names=topic_id_to_name)
+    if run_stability:
+        run_topic_stability_pipeline(
+            final_documents,
+            n_models=n_seeds if n_seeds > 1 else 10,
+            k=k,
+            top_n=20,
+            model_kwargs={"alpha": alpha, "eta": eta, "min_cf": min_cf, "tw": tw},
+            seeds=None,
+            output_dir="output",
+            reference_model=model,
+            reference_name=country_name,
+            seeded_topic_names=topic_id_to_name,
+            ensemble_models=ensemble_models,
+        )
 
 
