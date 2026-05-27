@@ -4,6 +4,7 @@ import tomotopy as tp
 import numpy as np
 import os
 import random
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from webscrapping import webscrape_articles
 from text_preprocessing import clean_scraped_text, detect_languages_in_texts, preprocess_pipeline, collect_seed_term_candidates, report_seed_coverage
@@ -32,6 +33,8 @@ if __name__ == "__main__":
     n_seeds               = int(multi_seed_arg.split("=")[1]) if multi_seed_arg and "=" in multi_seed_arg else 1
     posterior_samples_arg = next((a for a in os.sys.argv[1:] if a.startswith("--posterior-samples")), None)
     n_posterior_samples   = int(posterior_samples_arg.split("=")[1]) if posterior_samples_arg and "=" in posterior_samples_arg else 0
+    workers_arg           = next((a for a in os.sys.argv[1:] if a.startswith("--workers")), None)
+    n_workers             = int(workers_arg.split("=")[1]) if workers_arg and "=" in workers_arg else 1
     positional_args       = [a for a in os.sys.argv[1:] if not a.startswith("--")]
     country_name          = positional_args[0] if positional_args else "all"
 
@@ -176,7 +179,7 @@ if __name__ == "__main__":
     print()
     # -------------------------------------------------------------------------
 
-    k = 25
+    k = 40
     alpha = 50/k
     eta = 0.01
     min_cf = 0  # Vocabulary already filtered by min_df in preprocessing (with seed protection); tomotopy adds no second filter.
@@ -212,32 +215,45 @@ if __name__ == "__main__":
             m.train(total_iterations)
         return m
 
-    def _best_of_seeds(k_val, n, label=""):
+    def _best_of_seeds(k_val, n, label="", n_workers=1):
         seeds = [RANDOM_SEED + i for i in range(n)]
-        print(f"\nTraining {n} models (K={k_val}{label}), keeping best by C_V coherence...")
-        all_models, best_model, best_score, seed_results = [], None, -np.inf, []
-        for seed in seeds:
-            tqdm.write(f"  seed={seed} ...", end=" ")
+        print(f"\nTraining {n} models (K={k_val}{label}), keeping best by C_V coherence "
+              f"({'parallel' if n_workers > 1 else 'sequential'}, workers={n_workers})...")
+        seed_results = []
+
+        def _train_and_score(seed):
             m = _train_model(seed, verbose=False)
-            all_models.append(m)
             coh_eval = tp.coherence.Coherence(m, coherence="c_v", top_n=top_n)
             score = float(np.mean([coh_eval.get_score(topic_id=i) for i in range(m.k)]))
-            seed_results.append((seed, score))
-            tqdm.write(f"C_V = {score:.4f}")
-            if score > best_score:
-                best_score, best_model = score, m
-        best_seed = seed_results[int(np.argmax([r[1] for r in seed_results]))][0]
+            return seed, m, score
+
+        if n_workers > 1:
+            with ThreadPoolExecutor(max_workers=n_workers) as pool:
+                futures = {pool.submit(_train_and_score, s): s for s in seeds}
+                for fut in as_completed(futures):
+                    seed, m, score = fut.result()
+                    seed_results.append((seed, m, score))
+                    tqdm.write(f"  seed={seed}  C_V = {score:.4f}")
+        else:
+            for seed in seeds:
+                tqdm.write(f"  seed={seed} ...", end=" ")
+                seed, m, score = _train_and_score(seed)
+                seed_results.append((seed, m, score))
+                tqdm.write(f"C_V = {score:.4f}")
+
+        best_idx = int(np.argmax([r[2] for r in seed_results]))
+        best_seed, best_model, best_score = seed_results[best_idx]
         print(f"Best seed: {best_seed}  (C_V = {best_score:.4f})")
-        for seed, score in seed_results:
+        for seed, _, score in seed_results:
             marker = " <--" if seed == best_seed else ""
             print(f"  seed={seed}  coherence={score:.4f}{marker}")
-        # return best model first so it becomes the stability reference
+        all_models = [r[1] for r in seed_results]
         other_models = [m for m in all_models if m is not best_model]
         return best_model, [best_model] + other_models
 
     # --- step 1: find K (optional) ------------------------------------------
     if run_k_search:
-        k_range = range(20, 100, 10)
+        k_range = range(20, 60, 5)
         k, model, k_search_results = find_best_k(
             final_documents,
             k_values=k_range,
@@ -256,6 +272,7 @@ if __name__ == "__main__":
             output_dir="output",
             country_name=country_name,
             random_seed=RANDOM_SEED,
+            n_workers=n_workers,
         )
         print(f"\nK search selected K={k}.")
     else:
@@ -264,7 +281,7 @@ if __name__ == "__main__":
     # --- step 2: train at chosen K (single seed or best-of-N) ---------------
     ensemble_models = None
     if n_seeds > 1:
-        model, ensemble_models = _best_of_seeds(k, n_seeds, label=", from k-search" if run_k_search else "")
+        model, ensemble_models = _best_of_seeds(k, n_seeds, label=", from k-search" if run_k_search else "", n_workers=n_workers)
     elif not run_k_search:
         print(f"Adding {len(final_documents)} documents to the model...")
         model = _train_model(RANDOM_SEED, verbose=True)
@@ -338,6 +355,7 @@ if __name__ == "__main__":
             reference_name=country_name,
             seeded_topic_names=topic_id_to_name,
             ensemble_models=ensemble_models,
+            n_workers=n_workers,
         )
 
 
