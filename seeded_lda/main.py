@@ -187,7 +187,11 @@ if __name__ == "__main__":
     # -------------------------------------------------------------------------
 
     k = 30
+<<<<<<< HEAD
     alpha = 0.000001
+=======
+    alpha = 0.001
+>>>>>>> e340351 (update)
     eta = 0.01
     min_cf = 0  # Vocabulary already filtered by min_df in preprocessing (with seed protection); tomotopy adds no second filter.
     tw = tp.TermWeight.PMI  #PMI
@@ -260,7 +264,7 @@ if __name__ == "__main__":
 
     # --- step 1: find K (optional) ------------------------------------------
     if run_k_search:
-        k_range = range(20, 60, 5)
+        k_range = range(15, 40, 5)
         k, model, k_search_results = find_best_k(
             final_documents,
             k_values=k_range,
@@ -268,7 +272,7 @@ if __name__ == "__main__":
             eta=eta,
             min_cf=min_cf,
             tw=tw,
-            n_iterations=4000,
+            n_iterations=5000,
             coherence_measure="c_v",
             top_n=top_n,
             use_diversity=True,
@@ -363,7 +367,7 @@ if __name__ == "__main__":
             final_documents,
             n_models=n_seeds if n_seeds > 1 else 10,
             k=k,
-            top_n=20,
+            top_n=top_n,
             model_kwargs={"alpha": alpha, "eta": eta, "min_cf": min_cf, "tw": tw},
             seeds=None,
             output_dir="output",
