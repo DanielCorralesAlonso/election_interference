@@ -1,19 +1,20 @@
+import ast
 import pandas as pd
 from tqdm import tqdm
 import tomotopy as tp
 import numpy as np
 import os
 import random
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from webscrapping import webscrape_articles
 from text_preprocessing import clean_scraped_text, detect_languages_in_texts, preprocess_pipeline, collect_seed_term_candidates, report_seed_coverage
-from config import custom_words_to_remove, seed_lexicon
+from config import custom_words_to_remove, seed_lexicon, election_dates
 from set_seeded_prior import set_seeded_prior
 from utils import print_topic_overview, print_document_topics, print_document_topics_by_country, print_corpus_topic_distribution, print_topic_coherence
-from plot import plot_topic_evolution, plot_topic_evolution_comparison, plot_document_length_distribution, plot_document_entropy_by_country
+from plot import plot_topic_evolution, plot_topic_evolution_comparison, plot_document_length_distribution, plot_document_entropy_by_country, plot_topic_cooccurrence, plot_narrative_by_country, plot_narrative_stacked_area, plot_all_topics_stacked_area
 from topic_stability_analysis import run_topic_stability_pipeline
 from find_best_k import find_best_k
+from alpha_search import run_alpha_search
 
 
 
@@ -27,14 +28,27 @@ if __name__ == "__main__":
     use_cached_df = "--use-cached-df" in os.sys.argv[1:]
     skip_preprocess = "--skip-preprocess" in os.sys.argv[1:]
     run_k_search          = "--find-best-k"        in os.sys.argv[1:]
+    alpha_values_arg      = next((a for a in os.sys.argv[1:] if a.startswith("--alpha-values")), None)
+    alpha_search_values   = ([float(v) for v in alpha_values_arg.split("=")[1].split(",")]
+                             if alpha_values_arg and "=" in alpha_values_arg
+                             else None)
+    optim_interval_arg    = next((a for a in os.sys.argv[1:] if a.startswith("--optim-interval")), None)
+    # Alpha values provided → fix alpha (optim_interval=0) so the chosen value
+    # is actually used. Explicit --optim-interval overrides this only when no
+    # alpha values are given. Omitting both keeps tomotopy's default (None → 10).
+    if alpha_search_values is not None:
+        optim_interval = 0
+    elif optim_interval_arg and "=" in optim_interval_arg:
+        optim_interval = int(optim_interval_arg.split("=")[1])
+    else:
+        optim_interval = None
     run_stability         = "--stability-analysis" in os.sys.argv[1:]
     show_prominence       = "--prominence"         in os.sys.argv[1:]
+    show_uncertainty      = "--uncertainty"        in os.sys.argv[1:]
     multi_seed_arg        = next((a for a in os.sys.argv[1:] if a.startswith("--multi-seed")), None)
     n_seeds               = int(multi_seed_arg.split("=")[1]) if multi_seed_arg and "=" in multi_seed_arg else 1
     posterior_samples_arg = next((a for a in os.sys.argv[1:] if a.startswith("--posterior-samples")), None)
     n_posterior_samples   = int(posterior_samples_arg.split("=")[1]) if posterior_samples_arg and "=" in posterior_samples_arg else 0
-    workers_arg           = next((a for a in os.sys.argv[1:] if a.startswith("--workers")), None)
-    n_workers             = int(workers_arg.split("=")[1]) if workers_arg and "=" in workers_arg else 1
     train_workers_arg     = next((a for a in os.sys.argv[1:] if a.startswith("--train-workers")), None)
     n_train_workers       = int(train_workers_arg.split("=")[1]) if train_workers_arg and "=" in train_workers_arg else 0
     positional_args       = [a for a in os.sys.argv[1:] if not a.startswith("--")]
@@ -51,7 +65,7 @@ if __name__ == "__main__":
             if isinstance(val, list):
                 return val
             if isinstance(val, str):
-                return eval(val)
+                return ast.literal_eval(val)
             return []
         df_w_texts['Processed_Tokens'] = df_w_texts['Processed_Tokens'].apply(_parse_tokens)
         final_documents = df_w_texts['Processed_Tokens'].tolist()
@@ -64,7 +78,7 @@ if __name__ == "__main__":
             file_name = f"data/gdelt/GDELT_Extraction_2024_{country_name}_Election_Propaganda.csv"
             print(f"Attempting to load data from {file_name}...\n")
             df = pd.read_csv(file_name)
-        except:
+        except FileNotFoundError:
             file_name = "data/gdelt/April16th_w_ELECTION_PROPAGANDA.csv"
             print(f"Failed to load country-specific file. Defaulting to {file_name}...\n")
             df = pd.read_csv(file_name)
@@ -90,8 +104,7 @@ if __name__ == "__main__":
         df_w_texts = df_w_texts[df_w_texts['Text_Length'] >= 100].reset_index(drop=True)
         print(f"After filtering out short texts (probably scrapping gone wrong), we have {len(df_w_texts)} articles.\n")
 
-        for i in range(len(df_w_texts)):
-            df_w_texts.loc[i, 'Full_Text'] = clean_scraped_text(df_w_texts.loc[i, 'Full_Text'])
+        df_w_texts['Full_Text'] = df_w_texts['Full_Text'].apply(clean_scraped_text)
 
         df_w_texts.drop(df_w_texts[df_w_texts['Full_Text'] == ''].index, inplace=True)
         print(f"After cleaning, we have {len(df_w_texts)} articles with non-empty text.\n")
@@ -100,8 +113,7 @@ if __name__ == "__main__":
         print(f"Filtering to only English articles...")
         df_w_texts = df_w_texts[df_w_texts['Language'] == 'en'].reset_index(drop=True)
         print(f"After language filtering, we have {len(df_w_texts)} English articles.\n")
-        for i in range(len(df_w_texts)):
-            df_w_texts.loc[i, 'Full_Text'] = df_w_texts.loc[i, 'Full_Text'].encode('ascii', 'ignore').decode('utf-8')
+        df_w_texts['Full_Text'] = df_w_texts['Full_Text'].apply(lambda t: t.encode('ascii', 'ignore').decode('utf-8'))
 
         protected_seed_terms = collect_seed_term_candidates(seed_lexicon)
         preprocessing_result = preprocess_pipeline(
@@ -190,7 +202,7 @@ if __name__ == "__main__":
     alpha = 0.000001
     eta = 0.01
     min_cf = 0  # Vocabulary already filtered by min_df in preprocessing (with seed protection); tomotopy adds no second filter.
-    tw = tp.TermWeight.PMI  #PMI
+    tw = tp.TermWeight.PMI
 
     top_n = 20
 
@@ -204,6 +216,11 @@ if __name__ == "__main__":
     # --- helper: train one model at fixed k ---------------------------------
     def _train_model(seed, verbose=True):
         m = tp.LDAModel(k=k, alpha=alpha, eta=eta, min_cf=min_cf, tw=tw, seed=seed)
+        if optim_interval is not None:
+            # tomotopy re-estimates alpha/eta from the data every
+            # `optim_interval` iterations by default (10) — set to 0 so the
+            # alpha/eta configured above are the values actually trained with.
+            m.optim_interval = optim_interval
         for doc in final_documents:
             m.add_doc(doc)
         m = set_seeded_prior(m, seed_lexicon, topic_name_to_id=topic_name_to_id,
@@ -222,10 +239,9 @@ if __name__ == "__main__":
             m.train(total_iterations, workers=n_train_workers)
         return m
 
-    def _best_of_seeds(k_val, n, label="", n_workers=1):
+    def _best_of_seeds(k_val, n, label=""):
         seeds = [RANDOM_SEED + i for i in range(n)]
-        print(f"\nTraining {n} models (K={k_val}{label}), keeping best by C_V coherence "
-              f"({'parallel' if n_workers > 1 else 'sequential'}, workers={n_workers})...")
+        print(f"\nTraining {n} models (K={k_val}{label}), keeping best by C_V coherence...")
         seed_results = []
 
         def _train_and_score(seed):
@@ -234,19 +250,11 @@ if __name__ == "__main__":
             score = float(np.mean([coh_eval.get_score(topic_id=i) for i in range(m.k)]))
             return seed, m, score
 
-        if n_workers > 1:
-            with ThreadPoolExecutor(max_workers=n_workers) as pool:
-                futures = {pool.submit(_train_and_score, s): s for s in seeds}
-                for fut in as_completed(futures):
-                    seed, m, score = fut.result()
-                    seed_results.append((seed, m, score))
-                    tqdm.write(f"  seed={seed}  C_V = {score:.4f}")
-        else:
-            for seed in seeds:
-                tqdm.write(f"  seed={seed} ...", end=" ")
-                seed, m, score = _train_and_score(seed)
-                seed_results.append((seed, m, score))
-                tqdm.write(f"C_V = {score:.4f}")
+        for seed in seeds:
+            tqdm.write(f"  seed={seed} ...", end=" ")
+            seed, m, score = _train_and_score(seed)
+            seed_results.append((seed, m, score))
+            tqdm.write(f"C_V = {score:.4f}")
 
         best_idx = int(np.argmax([r[2] for r in seed_results]))
         best_seed, best_model, best_score = seed_results[best_idx]
@@ -268,7 +276,7 @@ if __name__ == "__main__":
             eta=eta,
             min_cf=min_cf,
             tw=tw,
-            n_iterations=4000,
+            n_iterations=10000,
             coherence_measure="c_v",
             top_n=top_n,
             use_diversity=True,
@@ -279,17 +287,51 @@ if __name__ == "__main__":
             output_dir="output",
             country_name=country_name,
             random_seed=RANDOM_SEED,
-            n_workers=n_workers,
             n_train_workers=n_train_workers,
+            optim_interval=optim_interval,
         )
         print(f"\nK search selected K={k}.")
     else:
         k = k
 
+    # --- step 1.5: alpha selection (optional) -----------------------------------
+    # One alpha value  → use it directly (fixed, no search).
+    # Multiple values  → run search over them and pick the best by C_V coherence.
+    # No alpha values + optim_interval=0 → keep default alpha fixed.
+    # No alpha values + optim_interval=None → tomotopy re-estimates alpha (default).
+    if alpha_search_values is not None:
+        if len(alpha_search_values) == 1:
+            alpha = alpha_search_values[0]
+            print(f"Single alpha value provided: using alpha={alpha:.2e} (fixed).")
+        else:
+            best_alpha, _, _ = run_alpha_search(
+                final_documents,
+                alpha_values=alpha_search_values,
+                k=k,
+                eta=eta,
+                min_cf=min_cf,
+                tw=tw,
+                n_iterations=4000,
+                coherence_measure="c_v",
+                top_n=top_n,
+                use_diversity=True,
+                diversity_top_n=top_n,
+                seed_lexicon=seed_lexicon,
+                seed_weight=seed_weight,
+                regular_weight=regular_weight,
+                output_dir="output",
+                country_name=country_name,
+                random_seed=RANDOM_SEED,
+                n_train_workers=n_train_workers,
+                optim_interval=optim_interval,
+            )
+            print(f"Alpha search selected alpha={best_alpha:.2e} for main run.")
+            alpha = best_alpha
+
     # --- step 2: train at chosen K (single seed or best-of-N) ---------------
     ensemble_models = None
     if n_seeds > 1:
-        model, ensemble_models = _best_of_seeds(k, n_seeds, label=", from k-search" if run_k_search else "", n_workers=n_workers)
+        model, ensemble_models = _best_of_seeds(k, n_seeds, label=", from k-search" if run_k_search else "")
     elif not run_k_search:
         print(f"Adding {len(final_documents)} documents to the model...")
         model = _train_model(RANDOM_SEED, verbose=True)
@@ -320,12 +362,18 @@ if __name__ == "__main__":
     print_corpus_topic_distribution(mdl, topic_id_to_name=topic_id_to_name, output_dir="output", country_name=country_name)
 
     plot_document_entropy_by_country(mdl, df_w_texts, output_dir="output", country_name=country_name)
+    plot_topic_cooccurrence(mdl, output_dir="output", topic_id_to_name=topic_id_to_name, country_name=country_name)
 
 
     _country_topic_ids = {i for name, i in topic_name_to_id.items() if name in {"russia", "china", "iran"}}
     plot_topics = [i for i in sorted(topic_id_to_name.keys()) if i not in _country_topic_ids]
+    country_actor_topics = sorted(_country_topic_ids)
 
-    plot_topic_evolution(mdl, df_w_texts=df_w_texts, topic_id_to_name=topic_id_to_name, output_dir="output", country_name=country_name, topics_to_plot=plot_topics, theta_samples=theta_samples, show_prominence=show_prominence)
+    plot_topic_evolution(mdl, df_w_texts=df_w_texts, topic_id_to_name=topic_id_to_name, output_dir="output", country_name=country_name, topics_to_plot=plot_topics, theta_samples=theta_samples, show_prominence=show_prominence, show_uncertainty=show_uncertainty, election_dates=election_dates)
+
+    if country_actor_topics:
+        print("\nGenerating country-actor topic evolution plot...")
+        plot_topic_evolution(mdl, df_w_texts=df_w_texts, topic_id_to_name=topic_id_to_name, output_dir="output", country_name=f"{country_name}_actors", topics_to_plot=country_actor_topics, theta_samples=theta_samples, show_prominence=show_prominence, show_uncertainty=show_uncertainty, election_dates=election_dates)
 
     if country_name == "all":
         for country in df_w_texts['Country'].unique():
@@ -340,6 +388,8 @@ if __name__ == "__main__":
                 topics_to_plot=plot_topics,
                 theta_samples=theta_samples,
                 show_prominence=show_prominence,
+                show_uncertainty=show_uncertainty,
+                election_dates=election_dates,
             )
             # Generate document topics using the common model, first doc from this country
             country_doc_idx = country_df.index[0]
@@ -355,8 +405,43 @@ if __name__ == "__main__":
             output_dir="output",
             countries=("Russia", "China", "Iran"),
             theta_samples=theta_samples,
+            show_uncertainty=show_uncertainty,
+            election_dates=election_dates,
         )
 
+    if 'Country' in df_w_texts.columns:
+        print("\nGenerating cross-country narrative comparison plot...")
+        plot_narrative_by_country(
+            mdl,
+            df_w_texts=df_w_texts,
+            topic_id_to_name=topic_id_to_name,
+            narrative_topic_ids=plot_topics,
+            output_dir="output",
+            country_name=country_name,
+            show_uncertainty=show_uncertainty,
+            election_dates=election_dates,
+        )
+
+    print("\nGenerating stacked area narrative plot...")
+    plot_narrative_stacked_area(
+        mdl,
+        df_w_texts=df_w_texts,
+        topic_id_to_name=topic_id_to_name,
+        narrative_topic_ids=plot_topics,
+        output_dir="output",
+        country_name=country_name,
+        election_dates=election_dates,
+    )
+
+    print("\nGenerating full topic stacked area plot...")
+    plot_all_topics_stacked_area(
+        mdl,
+        df_w_texts=df_w_texts,
+        topic_id_to_name=topic_id_to_name,
+        output_dir="output",
+        country_name=country_name,
+        election_dates=election_dates,
+    )
 
     if run_stability:
         run_topic_stability_pipeline(
@@ -371,8 +456,8 @@ if __name__ == "__main__":
             reference_name=country_name,
             seeded_topic_names=topic_id_to_name,
             ensemble_models=ensemble_models,
-            n_workers=n_workers,
             n_train_workers=n_train_workers,
+            optim_interval=optim_interval,
         )
 
 
