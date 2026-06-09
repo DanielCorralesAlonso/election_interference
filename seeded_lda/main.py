@@ -268,7 +268,7 @@ if __name__ == "__main__":
 
     # --- step 1: find K (optional) ------------------------------------------
     if run_k_search:
-        k_range = range(15, 40, 5)
+        k_range = range(10, 70, 10)
         k, model, k_search_results = find_best_k(
             final_documents,
             k_values=k_range,
