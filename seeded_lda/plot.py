@@ -744,7 +744,7 @@ def plot_topic_evolution_comparison(
     else:
         y_min, y_max = 0.0, 1.0
 
-    fig, axes = plt.subplots(len(country_frames), 1, figsize=(14, 4.5 * len(country_frames)), sharex=True, sharey=True)
+    fig, axes = plt.subplots(len(country_frames), 1, figsize=(10, 3.5 * len(country_frames)), sharex=True, sharey=True)
     if len(country_frames) == 1:
         axes = [axes]
 
@@ -777,13 +777,12 @@ def plot_topic_evolution_comparison(
     if handles:
         fig.legend(
             handles, labels,
-            title="Topics",
             loc='upper center',
-            bbox_to_anchor=(0.5, 0.92),
+            bbox_to_anchor=(0.5, 0.95),
             ncol=len(handles),
             frameon=False,
         )
-    fig.tight_layout(rect=[0, 0, 1, 0.85])
+    fig.tight_layout(rect=[0, 0, 1, 1])
     output_path = os.path.join(output_dir, filename)
     fig.savefig(output_path, dpi=300, bbox_inches="tight")
     print(f"Saved comparison topic evolution plot to {output_path}")
@@ -1185,3 +1184,123 @@ def plot_all_topics_stacked_area(
     fig.savefig(plot_path, dpi=300, bbox_inches='tight')
     plt.close(fig)
     print(f'Full topic stacked area plot saved to {plot_path}')
+
+
+def plot_alpha_distribution(mdl, topic_id_to_name, output_dir="output", country_name=""):
+    """Bar chart of the per-topic alpha values after empirical Bayes optimisation.
+
+    Seeded topics are highlighted in a distinct colour so you can immediately
+    see whether the optimizer pushed them above or below the unseeded baseline.
+    Topics are sorted by alpha descending so the most prominent topics are on
+    the left.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    alpha_vec = np.atleast_1d(mdl.alpha)          # shape (K,) or scalar broadcast
+    if alpha_vec.shape == () or len(alpha_vec) == 1:
+        # Symmetric model — broadcast to K values for a uniform bar chart
+        alpha_vec = np.full(mdl.k, float(alpha_vec))
+
+    seeded_ids = set(topic_id_to_name.keys())
+
+    # Sort topics by alpha descending
+    order = np.argsort(alpha_vec)[::-1]
+    sorted_alpha  = alpha_vec[order]
+    sorted_labels = []
+    sorted_colors = []
+    for tid in order:
+        if tid in seeded_ids:
+            sorted_labels.append(f'[{topic_id_to_name[tid]}]')
+            sorted_colors.append('#d62728')   # red for seeded
+        else:
+            top_words = [w for w, _ in mdl.get_topic_words(tid, top_n=2)]
+            sorted_labels.append(', '.join(top_words))
+            sorted_colors.append('#aec7e8')   # light blue for unseeded
+
+    fig, ax = plt.subplots(figsize=(max(10, mdl.k * 0.45), 4))
+    x = np.arange(len(sorted_alpha))
+    bars = ax.bar(x, sorted_alpha, color=sorted_colors, edgecolor='white', linewidth=0.5)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(sorted_labels, rotation=60, ha='right')
+    ax.set_ylabel('α (Dirichlet concentration)')
+    ax.set_xlabel('Topic  (sorted by α, descending)')
+    _lbl = _country_label(country_name)
+    ax.set_title(f'Estimated α per topic after empirical Bayes{" — " + _lbl if _lbl else ""}')
+
+    # Reference line: symmetric 1/K baseline
+    ax.axhline(1.0 / mdl.k, color='grey', linestyle='--', linewidth=1.0, alpha=0.7,
+               label=f'1/K = {1/mdl.k:.4f}')
+
+    # Legend patches for the two categories
+    from matplotlib.patches import Patch
+    legend_handles = [
+        Patch(facecolor='#d62728', label='Seeded topic'),
+        Patch(facecolor='#aec7e8', label='Unseeded topic'),
+        ax.get_legend_handles_labels()[0][0],   # the 1/K line
+    ]
+    legend_labels = ['Seeded topic', 'Unseeded topic', f'1/K = {1/mdl.k:.4f}']
+    ax.legend(legend_handles, legend_labels, loc='upper right', frameon=True)
+
+    ax.grid(True, axis='y')
+    fig.tight_layout()
+    plot_path = os.path.join(output_dir, f'alpha_distribution_{country_name}.png')
+    fig.savefig(plot_path, dpi=300, bbox_inches='tight')
+    plt.close(fig)
+    print(f'Alpha distribution plot saved to {plot_path}')
+
+
+def plot_article_count_by_country(df_w_texts, output_dir="output", country_name="",
+                                   election_dates=None):
+    """One stacked panel per country showing raw daily article count.
+
+    Requires 'Event_Date' (YYYYMMDD int or str) and 'Country' columns in
+    df_w_texts. Panels share the y-axis scale; only the bottom panel carries
+    x-tick labels.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    if 'Country' not in df_w_texts.columns or 'Event_Date' not in df_w_texts.columns:
+        print("plot_article_count_by_country: requires 'Country' and 'Event_Date' columns — skipping.")
+        return
+
+    df = df_w_texts[['Event_Date', 'Country']].copy()
+    df['Event_Date'] = pd.to_datetime(df['Event_Date'].astype(str), format='%Y%m%d', errors='coerce')
+    df = df.dropna(subset=['Event_Date'])
+
+    countries = sorted(
+        df['Country'].unique(),
+        key=lambda c: (_ACTOR_PRIORITY.get(c.strip().lower(), 99), c)
+    )
+    n = len(countries)
+
+    fig, axes = plt.subplots(n, 1, figsize=(14, 3.5 * n), sharey=True, sharex=True)
+    if n == 1:
+        axes = [axes]
+
+    for ax, country in zip(axes, countries):
+        color   = _ACTOR_COLORS.get(country.strip().lower(), '#888888')
+        display = _COUNTRY_NAMES.get(country.strip().lower(), country)
+
+        mask  = df['Country'] == country
+        daily = df[mask].groupby('Event_Date').size()
+        full_range = pd.date_range(df['Event_Date'].min(), df['Event_Date'].max(), freq='D')
+        daily = daily.reindex(full_range, fill_value=0)
+
+        ax.plot(daily.index, daily.values, color=color, linewidth=1.0,
+                marker='o', markersize=3, markerfacecolor=color, markeredgewidth=0)
+
+        ax.set_title(f'{display} Activity', color=color)
+        ax.set_ylabel('Daily News')
+        ax.grid(True, axis='both', linestyle='--', alpha=0.5)
+        _draw_election_lines(ax, election_dates)
+
+    axes[-1].xaxis.set_major_formatter(mdates.DateFormatter('%b'))
+    axes[-1].xaxis.set_major_locator(mdates.MonthLocator())
+    axes[-1].set_xlabel(f'Timeline ({df["Event_Date"].dt.year.mode()[0]})')
+
+    fig.tight_layout()
+    plot_path = os.path.join(output_dir, f'article_count_by_country_{country_name}.png')
+    fig.savefig(plot_path, dpi=300, bbox_inches='tight')
+    plt.close(fig)
+    print(f'Article count plot saved to {plot_path}')
