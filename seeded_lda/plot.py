@@ -4,15 +4,27 @@ import pandas as pd
 import numpy as np
 import os
 
-# Make all plots publication-ready with larger fonts
 plt.rcParams.update({
-    'font.size': 14,          # Global font size
-    'axes.titlesize': 16,     # Subplot titles
-    'axes.labelsize': 14,     # X/Y axis labels
-    'xtick.labelsize': 12,    # X tick marks
-    'ytick.labelsize': 12,    # Y tick marks
-    'legend.fontsize': 12,    # Legend text
-    'figure.titlesize': 18    # Main overarching title
+    'font.family':            'serif',
+    'font.serif':             ['Times New Roman'],
+    'font.size':              13,
+    'axes.titlesize':         13,
+    'axes.titleweight':       'bold',
+    'axes.labelsize':         10,
+    'xtick.labelsize':         10,
+    'ytick.labelsize':         10,
+    'legend.fontsize':         10,
+    'legend.title_fontsize':  13,
+    'legend.framealpha':       0.9,
+    'legend.edgecolor':       '#cccccc',
+    'figure.titlesize':       15,
+    'figure.titleweight':     'bold',
+    'axes.spines.top':        False,
+    'axes.spines.right':      False,
+    'grid.linestyle':         '--',
+    'grid.alpha':              0.4,
+    'savefig.dpi':            300,
+    'savefig.bbox':           'tight',
 })
 
 
@@ -51,6 +63,32 @@ def _posterior_weekly_std(theta_samples, df_w_texts, weekly_index):
     return pd.DataFrame(std_vals, index=weekly_index, columns=topic_cols)
 
 
+_COUNTRY_NAMES = {
+    'russia': 'Russia', 'all_russia': 'Russia',
+    'china':  'China',  'all_china':  'China',
+    'iran':   'Iran',   'all_iran':   'Iran',
+    'rus': 'Russia', 'chn': 'China', 'irn': 'Iran', 'usa': 'United States',
+}
+
+
+def _country_label(country_name):
+    """Return a clean display label suitable for plot titles.
+
+    'all' or '' → ''  (full corpus — no qualifier needed)
+    'all_Russia' → 'Russia',  'all_IRN' → 'Iran', etc.
+    Unknown values are title-cased as-is.
+    """
+    key = (country_name or '').strip().lower()
+    if not key or key == 'all':
+        return ''
+    if key in _COUNTRY_NAMES:
+        return _COUNTRY_NAMES[key]
+    if key.startswith('all_'):
+        suffix = key[4:]
+        return _COUNTRY_NAMES.get(suffix, suffix.capitalize())
+    return country_name.capitalize()
+
+
 def _draw_election_lines(ax, election_dates):
     """Draw a dashed vertical line + rotated label for each election date.
 
@@ -64,8 +102,6 @@ def _draw_election_lines(ax, election_dates):
     for label, date_str in election_dates.items():
         dt = pd.to_datetime(date_str)
         ax.axvline(dt, color='black', linestyle='--', linewidth=1.0, alpha=0.6)
-        ax.text(dt, 0.99, label, rotation=90, fontsize=7,
-                va='top', ha='right', alpha=0.75, transform=trans)
 
 
 def plot_topic_evolution(
@@ -252,7 +288,7 @@ def plot_topic_evolution(
     # 4. PLOTTING THE EVOLUTION
     # ==========================================
     # Set up a large, clean figure
-    plt.figure(figsize=(14, 7))
+    plt.figure(figsize=(10, 4))
 
     colors = [
         '#1f77b4', '#d62728', '#2ca02c', '#ff7f0e', '#9467bd',
@@ -271,29 +307,30 @@ def plot_topic_evolution(
             plt.fill_between(smoothed_trends.index, mean - 2*unc, mean + 2*unc, alpha=0.15, color=color)
 
     # Format the Graph visually
-    plt.title(f"Evolution of political narratives in the news - {country_name}", fontsize=18, fontweight='bold', pad=20)
-    plt.ylabel("Weekly topic share (%)", fontsize=12)
-    plt.xlabel("Date", fontsize=12)
+    _lbl = _country_label(country_name)
+    fig = plt.gcf()
+    fig.suptitle(f"Evolution of political narratives in the news{' — ' + _lbl if _lbl else ''}")
+    plt.ylabel("Weekly topic share (%)")
+    plt.xlabel("Date")
 
     # Format the X-axis dates nicely
     plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
-    plt.gca().xaxis.set_major_locator(mdates.MonthLocator(interval=1)) # Show a tick every 1 month
+    plt.gca().xaxis.set_major_locator(mdates.MonthLocator(interval=1))
     plt.xticks(rotation=45)
 
-    # Add a grid, legend, and layout
+    # Legend above axes, below suptitle — placed in figure space, not axes space
     plt.grid(True, linestyle='--', alpha=0.6)
     _draw_election_lines(plt.gca(), election_dates)
-    plt.legend(
-        title="Topics",
-        fontsize=10,
-        title_fontsize=11,
+    handles_leg, labels_leg = plt.gca().get_legend_handles_labels()
+    fig.legend(
+        handles_leg, labels_leg,
         loc='upper center',
-        bbox_to_anchor=(0.5, -0.22),
+        bbox_to_anchor=(0.5, 0.95),
         ncol=len(topics_to_plot),
-        frameon=True,
+        frameon=False,
     )
     plt.tight_layout()
-    plt.subplots_adjust(bottom=0.28)
+    plt.subplots_adjust(top=0.88)
 
     # Save or display the plot
     plt.savefig(os.path.join(output_dir, f"topic_evolution_{country_name}.png"), dpi=300, bbox_inches='tight')
@@ -318,7 +355,7 @@ def plot_topic_evolution(
     prom_topic_cols = [c for c in df_prom_final.columns if c.startswith('Topic_')]
     smoothed_prom = df_prom_final[prom_topic_cols].resample('W').mean().fillna(0)
 
-    plt.figure(figsize=(14, 7))
+    plt.figure(figsize=(10, 4))
     for i, k_id in enumerate(topics_to_plot):
         col = f'Topic_{k_id}'
         if col not in smoothed_prom.columns:
@@ -332,24 +369,25 @@ def plot_topic_evolution(
             color=colors[i % len(colors)],
         )
 
-    plt.title(f"Topic prominence in news coverage — {country_name}", fontsize=18, fontweight='bold', pad=20)
-    plt.ylabel(f"Articles with topic in top-{top_n_prominence} (%)", fontsize=12)
-    plt.xlabel("Date", fontsize=12)
+    _lbl = _country_label(country_name)
+    fig_prom = plt.gcf()
+    fig_prom.suptitle(f"Topic prominence in news coverage{' — ' + _lbl if _lbl else ''}")
+    plt.ylabel(f"Articles with topic in top-{top_n_prominence} (%)")
+    plt.xlabel("Date")
     plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
     plt.gca().xaxis.set_major_locator(mdates.MonthLocator(interval=1))
     plt.xticks(rotation=45)
     plt.grid(True, linestyle='--', alpha=0.6)
-    plt.legend(
-        title="Topics",
-        fontsize=10,
-        title_fontsize=11,
+    handles_prom, labels_prom = plt.gca().get_legend_handles_labels()
+    fig_prom.legend(
+        handles_prom, labels_prom,
         loc='upper center',
-        bbox_to_anchor=(0.5, -0.22),
+        bbox_to_anchor=(0.5, 0.95),
         ncol=len(topics_to_plot),
-        frameon=True,
+        frameon=False,
     )
     plt.tight_layout()
-    plt.subplots_adjust(bottom=0.28)
+    plt.subplots_adjust(top=0.88)
     plt.savefig(os.path.join(output_dir, f"topic_prominence_{country_name}.png"), dpi=300, bbox_inches='tight')
     plt.close()
 
@@ -408,22 +446,35 @@ def plot_document_entropy_by_country(mdl, df_w_texts, output_dir="output", count
 
     # Plot
     countries_present = df_ent[group_col].dropna().unique()
+    country_order = [c for c in ['Russia', 'China', 'Iran'] if c in countries_present] + \
+                    sorted(c for c in countries_present if c not in {'Russia', 'China', 'Iran'})
+    fallback_palette = plt.cm.get_cmap('Set2')
+    fallback_idx = 0
+    palette = {}
+    for c in country_order:
+        key = str(c).strip().lower()
+        if key in _ACTOR_COLORS:
+            palette[c] = _ACTOR_COLORS[key]
+        else:
+            palette[c] = fallback_palette(fallback_idx % 8)
+            fallback_idx += 1
+
     fig, ax = plt.subplots(figsize=(max(6, 2.5 * len(countries_present)), 6))
 
     sns.violinplot(
         data=df_ent, x=group_col, y="Norm_Entropy",
-        inner=None, palette="Set2", alpha=0.6, ax=ax, order=sorted(countries_present),
+        inner=None, palette=palette, alpha=0.6, ax=ax, order=country_order,
     )
     sns.stripplot(
         data=df_ent, x=group_col, y="Norm_Entropy",
-        color="black", alpha=0.15, size=2.5, jitter=True, ax=ax, order=sorted(countries_present),
+        color="black", alpha=0.15, size=2.5, jitter=True, ax=ax, order=country_order,
     )
 
     ax.axhline(1.0, color="red", linestyle="--", linewidth=1, label=f"Max entropy (uniform over {K} topics)")
-    ax.set_xlabel("Country", fontsize=13)
-    ax.set_ylabel(f"Normalised entropy  H(θ) / log({K})", fontsize=13)
-    ax.set_title("Per-document topic entropy by country\n(higher = more diffuse topic mix per article)", fontsize=14)
-    ax.legend(fontsize=10)
+    ax.set_xlabel("Country")
+    ax.set_ylabel(f"Normalised entropy  H(θ) / log({K})")
+    ax.set_title("Per-document topic entropy by country\n(higher = more diffuse topic mix per article)")
+    ax.legend()
     ax.set_ylim(0, 1.05)
     plt.tight_layout()
 
@@ -518,14 +569,13 @@ def plot_topic_cooccurrence(mdl, output_dir="output", topic_id_to_name=None,
         vmin=-1, vmax=1, center=0, square=True, mask=np.isnan(corr_plot),
         cbar_kws={"label": "Pearson r (CLR-transformed θ)"}, ax=ax,
     )
+    _lbl = _country_label(country_name)
     ax.set_title(
-        "Which narratives travel together within the same articles?\n"
-        f"Pearson r of CLR(θ) — {country_name}   (seeded topics in brackets)\n"
-        "CLR removes simplex bias; r > 0 = co-occurring framings, r < 0 = competing framings",
-        fontsize=11,
+        f"Topic co-occurrence{' — ' + _lbl if _lbl else ''}\n"
+        "Pearson r of CLR-transformed θ  ·  seeded topics in [ ]  ·  r > 0 co-occur, r < 0 compete"
     )
-    plt.xticks(rotation=90, fontsize=7)
-    plt.yticks(fontsize=7)
+    plt.xticks(rotation=90)
+    plt.yticks()
     plt.tight_layout()
 
     plot_path = os.path.join(output_dir, f"topic_cooccurrence_{country_name}.png")
@@ -555,9 +605,10 @@ def plot_document_length_distribution(df_w_texts, text_col, output_dir="output",
     plt.figure(figsize=(10, 6))
     df_w_texts['Doc_Length'] = df_w_texts[text_col].apply(len)
     plt.hist(df_w_texts['Doc_Length'], bins=30, color='skyblue', edgecolor='black')
-    plt.title(f"{title} - {country_name}", fontsize=16)
-    plt.xlabel("Number of Tokens", fontsize=12)
-    plt.ylabel("Number of Articles", fontsize=12)
+    _lbl = _country_label(country_name)
+    plt.title(f"{title}{' — ' + _lbl if _lbl else ''}")
+    plt.xlabel("Number of Tokens")
+    plt.ylabel("Number of Articles")
     plt.grid(axis='y', alpha=0.75)
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, f"doc_length_distribution_{country_name}.png"), dpi=300)
@@ -709,34 +760,30 @@ def plot_topic_evolution_comparison(
             if unc is not None and col in unc.columns:
                 unc_vals = unc[col].fillna(0) * 100
                 ax.fill_between(trends.index, mean_vals - 2*unc_vals, mean_vals + 2*unc_vals, alpha=0.15, color=color)
-        ax.set_title(country, fontsize=13, fontweight="bold")
-        ax.set_ylabel("Topic share (%)", fontsize=11)
+        ax.set_title(country)
+        ax.set_ylabel("Topic share (%)")
         ax.grid(True, linestyle="--", alpha=0.5)
         ax.set_ylim(y_min, y_max)
         _draw_election_lines(ax, election_dates)
 
-    axes[-1].set_xlabel("Date", fontsize=12)
+    axes[-1].set_xlabel("Date")
     axes[-1].xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
     axes[-1].xaxis.set_major_locator(mdates.MonthLocator(interval=1))
     plt.setp(axes[-1].get_xticklabels(), rotation=45, ha="right")
 
     handles, labels = axes[0].get_legend_handles_labels()
+
+    fig.suptitle("Topic evolution comparison: Russia, China, and Iran")
     if handles:
         fig.legend(
             handles, labels,
             title="Topics",
-            fontsize=10,
-            title_fontsize=11,
             loc='upper center',
-            bbox_to_anchor=(0.5, -0.35),
-            bbox_transform=axes[-1].transAxes,
+            bbox_to_anchor=(0.5, 0.92),
             ncol=len(handles),
-            frameon=True,
+            frameon=False,
         )
-
-    fig.suptitle("Topic evolution comparison: Russia, China, and Iran", fontsize=16, fontweight="bold")
-    fig.tight_layout(rect=[0, 0, 1, 0.97])
-    fig.subplots_adjust(bottom=0.18)
+    fig.tight_layout(rect=[0, 0, 1, 0.85])
     output_path = os.path.join(output_dir, filename)
     fig.savefig(output_path, dpi=300, bbox_inches="tight")
     print(f"Saved comparison topic evolution plot to {output_path}")
@@ -746,10 +793,15 @@ def plot_topic_evolution_comparison(
 
 
 _ACTOR_COLORS = {
-    'russia': '#d62728',  # red
-    'china':  '#1f77b4',  # blue
-    'iran':   '#2ca02c',  # green
+    # full names (lowercase)
+    'russia': '#d62728', 'china': '#1f77b4', 'iran': '#2ca02c',
+    # GDELT/CAMEO 3-letter codes (lowercase)
+    'rus':    '#d62728', 'chn':   '#1f77b4', 'irn':  '#2ca02c',
 }
+# Sort priority: Russia first, China second, Iran third, rest alphabetically
+_ACTOR_PRIORITY = {k: i for i, keys in enumerate([
+    ('russia', 'rus'), ('china', 'chn'), ('iran', 'irn')
+]) for k in keys}
 _FALLBACK_COLORS = ['#ff7f0e', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
 
 
@@ -779,17 +831,17 @@ def plot_narrative_by_country(
         print('plot_narrative_by_country: no Country column, skipping.')
         return
 
-    _preferred_order = ['Russia', 'China', 'Iran']
-    all_countries = set(df_w_texts['Country'].dropna().unique())
-    countries = [c for c in _preferred_order if c in all_countries] + \
-                sorted(c for c in all_countries if c not in _preferred_order)
-    if not countries:
+    all_countries = list(df_w_texts['Country'].dropna().unique())
+    if not all_countries:
         return
+    # Sort: Russia/RUS first, China/CHN second, Iran/IRN third, rest alphabetically.
+    # Works regardless of whether the Country column uses full names or CAMEO codes.
+    countries = sorted(all_countries, key=lambda c: (_ACTOR_PRIORITY.get(c.strip().lower(), 99), c))
 
     fallback_iter = iter(_FALLBACK_COLORS)
     color_map = {}
     for c in countries:
-        key = str(c).strip().lower()
+        key = c.strip().lower()
         color_map[c] = _ACTOR_COLORS.get(key, next(fallback_iter, '#333333'))
 
     valid_indices = set(df_w_texts.index)
@@ -827,7 +879,7 @@ def plot_narrative_by_country(
     fig, axes = plt.subplots(
         n_rows, n_cols,
         figsize=(panel_w * n_cols, panel_h * n_rows),
-        constrained_layout=True,
+        sharey=True,
     )
     axes_flat = np.array(axes).flatten() if n_topics > 1 else [axes]
 
@@ -847,7 +899,8 @@ def plot_narrative_by_country(
             weekly_mean = country_data[col].resample('W').mean().fillna(0)
             mean_vals   = weekly_mean * 100
             color       = color_map[country]
-            ax.plot(weekly_mean.index, mean_vals, label=country, linewidth=1.8, color=color)
+            display = _COUNTRY_NAMES.get(country.strip().lower(), country)
+            ax.plot(weekly_mean.index, mean_vals, label=display, linewidth=1.8, color=color)
             if show_uncertainty:
                 weekly_std   = country_data[col].resample('W').std()
                 weekly_count = country_data[col].resample('W').count()
@@ -857,34 +910,32 @@ def plot_narrative_by_country(
                     alpha=0.12, color=color,
                 )
 
-        ax.set_title(narrative_label, fontsize=10, fontweight='bold')
-        ax.set_ylabel('Topic share (%)', fontsize=8)
+        ax.set_title(narrative_label)
+        ax.set_ylabel('Topic share (%)')
         ax.grid(True, linestyle='--', alpha=0.4)
         _draw_election_lines(ax, election_dates)
         ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %y'))
         ax.xaxis.set_major_locator(mdates.MonthLocator(interval=2))
-        plt.setp(ax.get_xticklabels(), rotation=45, ha='right', fontsize=7)
-        plt.setp(ax.get_yticklabels(), fontsize=7)
+        plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
+        plt.setp(ax.get_yticklabels())
 
     for ax_idx in range(n_topics, len(axes_flat)):
         axes_flat[ax_idx].set_visible(False)
 
+    _lbl = _country_label(country_name)
+    fig.suptitle(
+        f'Cross-country narrative comparison{" — " + _lbl if _lbl else ""}',
+    )
     handles, labels = axes_flat[0].get_legend_handles_labels()
     if handles:
         fig.legend(
             handles, labels,
-            title='Country',
-            fontsize=10,
-            title_fontsize=11,
-            loc='outside lower center',
-            ncol=len(countries),
-            frameon=True,
+            loc='upper center',
+            bbox_to_anchor=(0.5, 0.96),
+            ncol=len(labels),
+            frameon=False,
         )
-
-    fig.suptitle(
-        f'Cross-country narrative comparison — {country_name}',
-        fontsize=14, fontweight='bold',
-    )
+    fig.tight_layout(rect=[0, 0, 1, 1])
     plot_path = os.path.join(output_dir, f'narrative_by_country_{country_name}.png')
     fig.savefig(plot_path, dpi=300, bbox_inches='tight')
     plt.close(fig)
@@ -962,29 +1013,27 @@ def plot_narrative_stacked_area(
     )
 
     ax.set_ylim(0, 100)
-    ax.set_ylabel('Share of narrative attention (%)', fontsize=12)
-    ax.set_xlabel('Date', fontsize=12)
-    ax.set_title(
-        f'Narrative composition over time — {country_name}',
-        fontsize=16, fontweight='bold', pad=14,
-    )
+    ax.set_ylabel('Share of narrative attention (%)')
+    ax.set_xlabel('Date')
+    _lbl = _country_label(country_name)
+    fig.suptitle(f'Narrative composition over time{" — " + _lbl if _lbl else ""}')
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
     ax.xaxis.set_major_locator(mdates.MonthLocator(interval=1))
     plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
     ax.grid(True, axis='y', linestyle='--', alpha=0.4)
     _draw_election_lines(ax, election_dates)
 
-    ax.legend(
+    handles_leg, labels_leg = ax.get_legend_handles_labels()
+    fig.legend(
+        handles_leg, labels_leg,
         title='Topics',
-        fontsize=9,
-        title_fontsize=10,
         loc='upper center',
-        bbox_to_anchor=(0.5, -0.22),
+        bbox_to_anchor=(0.5, 0.95),
         ncol=min(n, 6),
-        frameon=True,
+        frameon=False,
     )
     fig.tight_layout()
-    fig.subplots_adjust(bottom=0.28)
+    fig.subplots_adjust(top=0.88)
     plot_path = os.path.join(output_dir, f'narrative_stacked_area_{country_name}.png')
     fig.savefig(plot_path, dpi=300, bbox_inches='tight')
     plt.close(fig)
@@ -1066,14 +1115,19 @@ def plot_all_topics_stacked_area(
 
     labels = [_label(nid) for nid in ordered_nids]
 
-    # Colour: seeded topics get distinct tab10 colours, unseeded get tab20b
+    # Colour: country-named seeded topics use _ACTOR_COLORS for cross-plot consistency;
+    # other seeded topics get tab10; unseeded topics get tab20b.
     cmap_seeded = plt.cm.get_cmap('tab10')
     cmap_unseeded = plt.cm.get_cmap('tab20b')
     seeded_counter, unseeded_counter = 0, 0
     colors = []
     for nid in ordered_nids:
         if nid in seeded_ids:
-            colors.append(cmap_seeded(seeded_counter % 10))
+            topic_key = topic_id_to_name[nid].lower()
+            if topic_key in _ACTOR_COLORS:
+                colors.append(_ACTOR_COLORS[topic_key])
+            else:
+                colors.append(cmap_seeded(seeded_counter % 10))
             seeded_counter += 1
         else:
             colors.append(cmap_unseeded(unseeded_counter % 20))
@@ -1100,12 +1154,13 @@ def plot_all_topics_stacked_area(
     )
 
     ax.set_ylim(0, 100)
-    ax.set_ylabel('Share of all topic attention (%)', fontsize=12)
-    ax.set_xlabel('Date', fontsize=12)
+    ax.set_ylabel('Share of all topic attention (%)')
+    ax.set_xlabel('Date')
+    _lbl = _country_label(country_name)
     ax.set_title(
-        f'Full topic composition over time — {country_name}\n'
+        f'Full topic composition over time{" — " + _lbl if _lbl else ""}\n'
         f'(top {top_n} of {mdl.k} topics shown individually; seeded topics in brackets)',
-        fontsize=14, fontweight='bold', pad=14,
+        pad=14,
     )
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
     ax.xaxis.set_major_locator(mdates.MonthLocator(interval=1))
@@ -1114,17 +1169,18 @@ def plot_all_topics_stacked_area(
     _draw_election_lines(ax, election_dates)
 
     n_legend = len(stack_labels)
+    # Spread across the full horizontal axis: enough columns to fill the width
+    ncol_bottom = max(6, -(-n_legend // 3))  # ceiling-div gives ~3 rows max
     ax.legend(
         title='Topics  ([ ] = seeded)',
-        fontsize=8,
-        title_fontsize=9,
         loc='upper center',
-        bbox_to_anchor=(0.5, -0.22),
-        ncol=min(n_legend, 5),
+        bbox_to_anchor=(0.5, -0.12),
+        bbox_transform=ax.transAxes,
+        ncol=ncol_bottom,
         frameon=True,
     )
     fig.tight_layout()
-    fig.subplots_adjust(bottom=0.30)
+    fig.subplots_adjust(bottom=0.32)
     plot_path = os.path.join(output_dir, f'all_topics_stacked_area_{country_name}.png')
     fig.savefig(plot_path, dpi=300, bbox_inches='tight')
     plt.close(fig)
