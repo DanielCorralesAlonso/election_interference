@@ -139,7 +139,7 @@ def build_multi_chain_summary(reference_model, final_documents, n_chains, base_s
                                k, alpha, eta, min_cf, tw,
                                seed_lexicon, seed_weight, regular_weight,
                                total_iterations, topic_name_to_id,
-                               set_seeded_prior_fn):
+                               set_seeded_prior_fn, optim_interval=None):
     """
     Train (n_chains - 1) additional Gibbs chains, align every chain to the
     reference via the Hungarian algorithm, average aligned phi and theta, and
@@ -147,6 +147,13 @@ def build_multi_chain_summary(reference_model, final_documents, n_chains, base_s
 
     Reference chain (chain 0) is already trained; its topic ordering defines
     the canonical topic ID space.
+
+    optim_interval : int or None
+        Forwarded to each chain's `tp.LDAModel`. Tomotopy re-estimates
+        alpha/eta from the data every `optim_interval` iterations by default
+        (10), so `alpha`/`eta` here are otherwise only initial values. Pass 0
+        to keep them fixed throughout training (and consistent with however
+        the reference model was trained); None to use tomotopy's default.
     """
     import tomotopy as tp
     from tqdm import tqdm
@@ -167,6 +174,8 @@ def build_multi_chain_summary(reference_model, final_documents, n_chains, base_s
         print(f"\n  Training chain {chain_idx + 1}/{n_chains} (seed={chain_seed})...")
 
         chain_model = tp.LDAModel(k=k, alpha=alpha, eta=eta, min_cf=min_cf, tw=tw, seed=chain_seed)
+        if optim_interval is not None:
+            chain_model.optim_interval = optim_interval
         for doc in final_documents:
             chain_model.add_doc(doc)
         chain_model = set_seeded_prior_fn(chain_model, seed_lexicon, topic_name_to_id=topic_name_to_id,

@@ -11,6 +11,10 @@ seed_lexicon = {
 }
 
 
+election_dates = {
+    "US Election": "2024-11-05",
+}
+
 custom_words_to_remove = [
     # 1. REPORTING VERBS (The mechanics of journalism)
     "say", "tell", "report", "state", "add", "continue", "note", "speak",

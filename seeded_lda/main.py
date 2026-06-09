@@ -268,7 +268,7 @@ if __name__ == "__main__":
 
     # --- step 1: find K (optional) ------------------------------------------
     if run_k_search:
-        k_range = range(20, 60, 5)
+        k_range = range(15, 40, 5)
         k, model, k_search_results = find_best_k(
             final_documents,
             k_values=k_range,
@@ -448,7 +448,7 @@ if __name__ == "__main__":
             final_documents,
             n_models=n_seeds if n_seeds > 1 else 10,
             k=k,
-            top_n=20,
+            top_n=top_n,
             model_kwargs={"alpha": alpha, "eta": eta, "min_cf": min_cf, "tw": tw},
             seeds=None,
             output_dir="output",

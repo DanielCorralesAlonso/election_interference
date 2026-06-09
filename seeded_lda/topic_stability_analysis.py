@@ -12,7 +12,6 @@ from typing import List, Sequence, Tuple, Optional, Dict
 import tomotopy as tp
 import pickle
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from scipy.optimize import linear_sum_assignment
 from itertools import combinations
 import numpy as np
@@ -27,10 +26,17 @@ def train_lda_models(
     k: int = 100,
     model_kwargs=None,
     seeds: Sequence[int] = None,
-    n_workers: int = 1,
     n_train_workers: int = 0,
+    optim_interval=None,
 ) -> List[tp.LDAModel]:
-    """Train an ensemble of LDA models on the same corpus with different random seeds."""
+    """Train an ensemble of LDA models on the same corpus with different random seeds.
+
+    optim_interval : int or None
+        Forwarded to each `tp.LDAModel`. Tomotopy re-estimates alpha/eta from
+        the data every `optim_interval` iterations by default (10), so any
+        alpha/eta in `model_kwargs` are otherwise only initial values. Pass 0
+        to keep them fixed throughout training; None to use tomotopy's default.
+    """
     model_kwargs = model_kwargs or {}
 
     if seeds is None:
@@ -47,29 +53,19 @@ def train_lda_models(
     def _train_one(idx_seed):
         idx, seed = idx_seed
         m = tp.LDAModel(k=k, corpus=corpus, seed=seed, **model_kwargs)
+        if optim_interval is not None:
+            m.optim_interval = optim_interval
         m.train(0, workers=n_train_workers)
         for _ in range(0, train_iters, chunk_size):
             m.train(chunk_size, workers=n_train_workers)
         return idx, m
 
-    print(f"Training {n_models} ensemble models "
-          f"({'parallel' if n_workers > 1 else 'sequential'}, workers={n_workers})...")
-
-    if n_workers > 1:
-        results = [None] * n_models
-        with ThreadPoolExecutor(max_workers=n_workers) as pool:
-            futures = {pool.submit(_train_one, (i, seeds[i])): i for i in range(n_models)}
-            for fut in tqdm(as_completed(futures), total=n_models, desc="Training Ensemble Models"):
-                idx, m = fut.result()
-                results[idx] = m
-                tqdm.write(f"  Model {idx + 1}/{n_models} done")
-        return results
-    else:
-        models = []
-        for i in tqdm(range(n_models), desc="Training Ensemble Models"):
-            _, m = _train_one((i, seeds[i]))
-            models.append(m)
-        return models
+    print(f"Training {n_models} ensemble models...")
+    models = []
+    for i in tqdm(range(n_models), desc="Training Ensemble Models"):
+        _, m = _train_one((i, seeds[i]))
+        models.append(m)
+    return models
 
 
 def extract_top_word_sets_and_lists(models: Sequence[tp.LDAModel], top_n: int = 10) -> Tuple[List[List[set]], List[List[List[str]]]]:
@@ -157,14 +153,19 @@ def run_topic_stability_pipeline(
     reference_name: str = "reference",
     seeded_topic_names: Optional[Dict[int, str]] = None,
     ensemble_models: Optional[list] = None,
-    n_workers: int = 1,
     n_train_workers: int = 0,
+    optim_interval=None,
 ) -> Tuple[List[float], dict]:
     """Run stability analysis using reference_model as the reference (if provided).
 
     If ensemble_models is given (a list of already-trained LDAModels with the
     reference/best model first), no additional training is performed — the
     multi-seed run that selected the best model is reused directly.
+
+    optim_interval : int or None
+        Forwarded to `train_lda_models` for any additional ensemble models
+        trained here (ignored when `ensemble_models` is reused directly, since
+        those were already trained elsewhere with their own setting).
     """
     os.makedirs(output_dir, exist_ok=True)
     model_kwargs = model_kwargs or {}
@@ -177,11 +178,11 @@ def run_topic_stability_pipeline(
         to_train = max(0, n_models - 1)
         if to_train > 0:
             print(f"Reference model provided. Training {to_train} additional ensemble models.")
-            other_models = train_lda_models(docs, n_models=to_train, k=k, model_kwargs=model_kwargs, seeds=seeds, n_workers=n_workers, n_train_workers=n_train_workers)
+            other_models = train_lda_models(docs, n_models=to_train, k=k, model_kwargs=model_kwargs, seeds=seeds, n_train_workers=n_train_workers, optim_interval=optim_interval)
             models.extend(other_models)
     else:
         print(f"No reference provided. Training {n_models} models from scratch (Model 0 will be reference).")
-        models = train_lda_models(docs, n_models=n_models, k=k, model_kwargs=model_kwargs, seeds=seeds, n_workers=n_workers, n_train_workers=n_train_workers)
+        models = train_lda_models(docs, n_models=n_models, k=k, model_kwargs=model_kwargs, seeds=seeds, n_train_workers=n_train_workers, optim_interval=optim_interval)
 
     # Extract sets and lists
     all_sets, all_lists = extract_top_word_sets_and_lists(models, top_n=top_n)

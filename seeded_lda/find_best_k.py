@@ -4,7 +4,6 @@ import tomotopy as tp
 import matplotlib.pyplot as plt
 import seaborn as sns
 from tqdm import tqdm
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from set_seeded_prior import set_seeded_prior
 
 
@@ -32,13 +31,19 @@ def find_best_k(documents, k_values, alpha=0.2, eta=0.001, min_cf=5,
                 use_diversity=True, diversity_top_n=25,
                 seed_lexicon=None, seed_weight=10.0, regular_weight=0.001,
                 output_dir="output", country_name="all", random_seed=None,
-                n_workers=1, n_train_workers=0):
+                n_train_workers=0, optim_interval=None):
     """
     Train LDA models over a range of K values and select the best K by the
     elbow of the C_V coherence curve (Röder et al. 2015).
 
     Topic diversity (Dieng et al. 2020) is computed and shown as a diagnostic
     panel but does not affect K selection.
+
+    optim_interval : int or None
+        Forwarded to each `tp.LDAModel`. Tomotopy re-estimates alpha/eta from
+        the data every `optim_interval` iterations by default (10), so the
+        `alpha`/`eta` passed here are otherwise only initial values. Pass 0
+        to keep them fixed throughout training; None to use tomotopy's default.
 
     Returns
     -------
@@ -54,8 +59,7 @@ def find_best_k(documents, k_values, alpha=0.2, eta=0.001, min_cf=5,
 
     active_metrics = ["coherence"] + (["diversity"] if use_diversity else [])
     print(f"\nSearching for best K over {k_list} "
-          f"({n_iterations} iterations each, metrics={active_metrics}, "
-          f"{'parallel' if n_workers > 1 else 'sequential'}, workers={n_workers})...")
+          f"({n_iterations} iterations each, metrics={active_metrics})...")
 
     topic_name_to_id = (
         {name: i for i, name in enumerate(seed_lexicon.keys())}
@@ -64,6 +68,8 @@ def find_best_k(documents, k_values, alpha=0.2, eta=0.001, min_cf=5,
 
     def _train_k(k_val):
         m = tp.LDAModel(k=k_val, alpha=alpha, eta=eta, min_cf=min_cf, tw=tw, seed=random_seed)
+        if optim_interval is not None:
+            m.optim_interval = optim_interval
         for doc in documents:
             m.add_doc(doc)
         if seed_lexicon:
@@ -76,26 +82,12 @@ def find_best_k(documents, k_values, alpha=0.2, eta=0.001, min_cf=5,
         div = _topic_diversity(m, top_n=diversity_top_n) if use_diversity else None
         return k_val, avg_coh, div
 
-    if n_workers > 1:
-        k_results = {}
-        with ThreadPoolExecutor(max_workers=n_workers) as pool:
-            futures = {pool.submit(_train_k, k_val): k_val for k_val in k_list}
-            for fut in as_completed(futures):
-                k_val, avg_coh, div = fut.result()
-                k_results[k_val] = (avg_coh, div)
-                div_str = f"  diversity={div:.4f}" if use_diversity else ""
-                tqdm.write(f"  K={k_val:>4d}  coherence={avg_coh:.4f}{div_str}")
-        for k_val in k_list:
-            avg_coh, div = k_results[k_val]
-            coherences.append(avg_coh)
-            diversities.append(div)
-    else:
-        for k_val in tqdm(k_list, desc="K search"):
-            k_val, avg_coh, div = _train_k(k_val)
-            coherences.append(avg_coh)
-            diversities.append(div)
-            div_str = f"  diversity={div:.4f}" if use_diversity else ""
-            tqdm.write(f"  K={k_val:>4d}  coherence={avg_coh:.4f}{div_str}")
+    for k_val in tqdm(k_list, desc="K search"):
+        k_val, avg_coh, div = _train_k(k_val)
+        coherences.append(avg_coh)
+        diversities.append(div)
+        div_str = f"  diversity={div:.4f}" if use_diversity else ""
+        tqdm.write(f"  K={k_val:>4d}  coherence={avg_coh:.4f}{div_str}")
 
     # --- select K by elbow of coherence curve --------------------------------
     coh_arr = np.array(coherences, dtype=float)
