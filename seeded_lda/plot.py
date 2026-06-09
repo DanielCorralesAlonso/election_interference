@@ -760,7 +760,7 @@ def plot_narrative_by_country(
     narrative_topic_ids,
     output_dir="output",
     country_name="all",
-    n_cols=4,
+    n_cols=3,
     show_uncertainty=False,
     election_dates=None,
 ):
@@ -779,7 +779,10 @@ def plot_narrative_by_country(
         print('plot_narrative_by_country: no Country column, skipping.')
         return
 
-    countries = sorted(df_w_texts['Country'].dropna().unique())
+    _preferred_order = ['Russia', 'China', 'Iran']
+    all_countries = set(df_w_texts['Country'].dropna().unique())
+    countries = [c for c in _preferred_order if c in all_countries] + \
+                sorted(c for c in all_countries if c not in _preferred_order)
     if not countries:
         return
 
@@ -813,7 +816,11 @@ def plot_narrative_by_country(
     df_merged = df_merged.dropna(subset=['Event_Date']).set_index('Event_Date')
 
     n_topics = len(narrative_topic_ids)
-    n_cols   = min(n_cols, n_topics)
+    # Auto-pick n_cols: single row for ≤3 topics, else 3 columns (2×3 for 6 topics)
+    if n_topics <= 3:
+        n_cols = n_topics
+    else:
+        n_cols = min(n_cols, n_topics)
     n_rows   = int(np.ceil(n_topics / n_cols))
 
     panel_w, panel_h = 4.5, 3.2
