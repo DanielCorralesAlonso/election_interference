@@ -2,6 +2,7 @@ import os
 import json
 import hashlib
 import re
+import unicodedata
 from langdetect import detect, LangDetectException
 import spacy
 import stanza
@@ -22,6 +23,36 @@ except Exception:
     NearestNeighbors = None
     np = None
 
+
+
+# Punctuation that has a sensible ASCII equivalent — replaced before the
+# diacritic-stripping pass so words aren't merged together (e.g. "word—word"
+# would otherwise become "wordword" once the dash is dropped).
+_UNICODE_ASCII_REPLACEMENTS = {
+    '‘': "'", '’': "'",  # ' '
+    '“': '"', '”': '"',  # " "
+    '–': '-', '—': '-',  # – —
+    '…': '...',                # …
+    ' ': ' ',                  # non-breaking space
+}
+
+
+def normalize_unicode_to_ascii(text):
+    """Map accented/typographic characters to ASCII instead of dropping them.
+
+    Replaces common smart punctuation with its ASCII equivalent, then
+    decomposes remaining accented Latin characters (e.g. "Erdoğan" ->
+    "Erdogan") and drops any leftover combining marks / non-Latin script
+    characters.
+    """
+    if not isinstance(text, str):
+        return ""
+
+    for src, dst in _UNICODE_ASCII_REPLACEMENTS.items():
+        text = text.replace(src, dst)
+
+    text = unicodedata.normalize('NFKD', text)
+    return text.encode('ascii', 'ignore').decode('ascii')
 
 
 def clean_scraped_text(text):
@@ -335,6 +366,12 @@ def remove_near_duplicates(df, text_col="Full_Text", similarity_threshold=5, min
                         "hamming_distance": None,
                         "similarity": sim_val_rec,
                         "distance": (1.0 - sim_val_rec) if sim_val_rec is not None else None,
+                        "duplicate_url": df.iloc[idx].get("News_URL"),
+                        "representative_url": df.iloc[rep_df_idx].get("News_URL"),
+                        "duplicate_date": df.iloc[idx].get("Event_Date"),
+                        "representative_date": df.iloc[rep_df_idx].get("Event_Date"),
+                        "duplicate_snippet": str(df.iloc[idx][text_col])[:500],
+                        "representative_snippet": str(df.iloc[rep_df_idx][text_col])[:500],
                     })
 
             # assemble deduplicated dataframe keeping order of first occurrence
@@ -381,6 +418,12 @@ def remove_near_duplicates(df, text_col="Full_Text", similarity_threshold=5, min
                     "duplicate_index": int(original_index),
                     "representative_index": int(kept_exact_signatures[exact_signature]),
                     "reason": "exact",
+                    "duplicate_url": df.loc[original_index].get("News_URL"),
+                    "representative_url": df.loc[kept_exact_signatures[exact_signature]].get("News_URL"),
+                    "duplicate_date": df.loc[original_index].get("Event_Date"),
+                    "representative_date": df.loc[kept_exact_signatures[exact_signature]].get("Event_Date"),
+                    "duplicate_snippet": str(raw_text)[:500],
+                    "representative_snippet": str(df.loc[kept_exact_signatures[exact_signature]][text_col])[:500],
                 })
                 continue
 
@@ -414,6 +457,12 @@ def remove_near_duplicates(df, text_col="Full_Text", similarity_threshold=5, min
                     "representative_index": int(matched_representative),
                     "reason": "near",
                     "hamming_distance": int(matched_distance),
+                    "duplicate_url": df.loc[original_index].get("News_URL"),
+                    "representative_url": df.loc[matched_representative].get("News_URL"),
+                    "duplicate_date": df.loc[original_index].get("Event_Date"),
+                    "representative_date": df.loc[matched_representative].get("Event_Date"),
+                    "duplicate_snippet": str(raw_text)[:500],
+                    "representative_snippet": str(df.loc[matched_representative][text_col])[:500],
                 })
                 continue
 
@@ -458,6 +507,7 @@ def remove_near_duplicates(df, text_col="Full_Text", similarity_threshold=5, min
         "duplicate_examples": representative_examples,
         "exact_duplicate_samples": exact_examples,
         "near_duplicate_samples": near_examples,
+        "all_duplicate_records": duplicate_records,
     }
 
     print(
@@ -656,14 +706,36 @@ def report_seed_coverage(token_documents, seed_lexicon, output_path=None):
 
 
 
+def _detect_language(text, short_sample_words=50, long_sample_words=200):
+    if not isinstance(text, str) or not text.strip():
+        return 'unknown'
+
+    words = text.split()
+    try:
+        lang = detect(" ".join(words[:short_sample_words]))
+    except LangDetectException:
+        lang = 'unknown'
+
+    # A short opening sample (foreign quote, dateline, byline, ...) can
+    # misclassify an otherwise-English article. Re-check on a larger sample
+    # before discarding it.
+    if lang != 'en' and len(words) > short_sample_words:
+        try:
+            lang_full = detect(" ".join(words[:long_sample_words]))
+            if lang_full == 'en':
+                return 'en'
+        except LangDetectException:
+            pass
+
+    return lang
+
+
 def detect_languages_in_texts(df, text_col='Full_Text'):
     # 1. Initialize tqdm for pandas operations
     tqdm.pandas(desc="Detecting Languages")
-    
+
     # 2. Swap .apply() with .progress_apply()
-    df['Language'] = df[text_col].progress_apply(
-        lambda x: detect(" ".join(x.split()[:25])) if isinstance(x, str) else 'unknown'
-    )
+    df['Language'] = df[text_col].progress_apply(_detect_language)
     return df
 
 
@@ -885,6 +957,7 @@ def preprocess_pipeline(
         if country_col is not None:
             dedup_parts = []
             per_country_reports = {}
+            all_duplicate_records = []
             for country_val, group in df_w_texts.groupby(country_col):
                 part, report = remove_near_duplicates(
                     group,
@@ -893,6 +966,9 @@ def preprocess_pipeline(
                     min_tokens=dedup_min_tokens,
                 )
                 dedup_parts.append(part)
+                for record in report.pop("all_duplicate_records", []):
+                    record["country"] = str(country_val)
+                    all_duplicate_records.append(record)
                 per_country_reports[str(country_val)] = report
             deduplicated_df = pd.concat(dedup_parts)
             dedup_report = {
@@ -910,6 +986,73 @@ def preprocess_pipeline(
                 similarity_threshold=dedup_similarity_threshold,
                 min_tokens=dedup_min_tokens,
             )
+            all_duplicate_records = dedup_report.pop("all_duplicate_records", [])
+
+        if all_duplicate_records:
+            dedup_removed_path = os.path.join(output_dir, f"dedup_removed_{country_name}.csv")
+            dedup_records_df = pd.DataFrame(all_duplicate_records)
+            sort_col = next((c for c in ("similarity", "hamming_distance") if c in dedup_records_df.columns), None)
+            if sort_col:
+                dedup_records_df = dedup_records_df.sort_values(by=sort_col, ascending=True)
+            dedup_records_df.to_csv(dedup_removed_path, index=False)
+            print(f"Removed near-duplicate details written to: {dedup_removed_path}")
+
+            # Group records by (country, representative) so the original
+            # article and every text flagged as its duplicate sit side by
+            # side — much easier to eyeball than the flat CSV.
+            dedup_removed_json_path = os.path.join(output_dir, f"dedup_removed_{country_name}.json")
+            clusters = {}
+            for record in all_duplicate_records:
+                key = (record.get("country"), record["representative_index"])
+                if key not in clusters:
+                    clusters[key] = {
+                        "representative": {
+                            "index": record["representative_index"],
+                            "country": record.get("country"),
+                            "url": record.get("representative_url"),
+                            "date": record.get("representative_date"),
+                            "text": record.get("representative_snippet"),
+                        },
+                        "duplicates": [],
+                    }
+                clusters[key]["duplicates"].append({
+                    "index": record["duplicate_index"],
+                    "country": record.get("country"),
+                    "url": record.get("duplicate_url"),
+                    "date": record.get("duplicate_date"),
+                    "reason": record.get("reason"),
+                    "similarity": record.get("similarity"),
+                    "distance": record.get("distance"),
+                    "hamming_distance": record.get("hamming_distance"),
+                    "text": record.get("duplicate_snippet"),
+                })
+
+            def _borderline_key(dup):
+                if dup.get("similarity") is not None:
+                    return dup["similarity"]
+                return -(dup.get("hamming_distance") or 0)
+
+            cluster_list = list(clusters.values())
+            for cluster in cluster_list:
+                cluster["duplicates"].sort(key=_borderline_key)
+            cluster_list.sort(key=lambda c: _borderline_key(c["duplicates"][0]))
+
+            def _json_default(value):
+                if hasattr(value, "item"):
+                    return value.item()
+                return str(value)
+
+            with open(dedup_removed_json_path, "w", encoding="utf-8") as fh:
+                json.dump(
+                    {
+                        "country_name": country_name,
+                        "total_clusters": len(cluster_list),
+                        "total_removed": len(all_duplicate_records),
+                        "clusters": cluster_list,
+                    },
+                    fh, indent=2, ensure_ascii=False, default=_json_default,
+                )
+            print(f"Removed near-duplicate clusters (original vs. duplicate text) written to: {dedup_removed_json_path}")
         qa_report["deduplication"] = dedup_report
         dedup_indices = deduplicated_df.index.tolist()
 

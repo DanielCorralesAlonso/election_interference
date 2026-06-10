@@ -7,7 +7,7 @@ import os
 import random
 
 from webscrapping import webscrape_articles
-from text_preprocessing import clean_scraped_text, detect_languages_in_texts, preprocess_pipeline, collect_seed_term_candidates, report_seed_coverage
+from text_preprocessing import clean_scraped_text, detect_languages_in_texts, preprocess_pipeline, collect_seed_term_candidates, report_seed_coverage, normalize_unicode_to_ascii
 from config import custom_words_to_remove, seed_lexicon, election_dates
 from set_seeded_prior import set_seeded_prior
 from utils import print_topic_overview, print_document_topics, print_document_topics_by_country, print_corpus_topic_distribution, print_topic_coherence
@@ -25,7 +25,8 @@ if __name__ == "__main__":
     random.seed(RANDOM_SEED)
 
     force_preprocess = "--force-preprocess" in os.sys.argv[1:]
-    use_cached_df = "--use-cached-df" in os.sys.argv[1:]
+    force_rescrape = "--force-rescrape" in os.sys.argv[1:]
+    use_cached_df = not force_rescrape
     skip_preprocess = "--skip-preprocess" in os.sys.argv[1:]
     run_k_search          = "--find-best-k"        in os.sys.argv[1:]
     alpha_values_arg      = next((a for a in os.sys.argv[1:] if a.startswith("--alpha-values")), None)
@@ -106,14 +107,18 @@ if __name__ == "__main__":
 
         df_w_texts['Full_Text'] = df_w_texts['Full_Text'].apply(clean_scraped_text)
 
-        df_w_texts.drop(df_w_texts[df_w_texts['Full_Text'] == ''].index, inplace=True)
-        print(f"After cleaning, we have {len(df_w_texts)} articles with non-empty text.\n")
+        # Cleaning can strip most or all of an article's text (boilerplate-only
+        # pages, leftover consent-wall remnants, etc.) — re-check the length
+        # threshold on the cleaned text rather than relying on the raw length.
+        df_w_texts['Text_Length'] = df_w_texts['Full_Text'].apply(len)
+        df_w_texts = df_w_texts[df_w_texts['Text_Length'] >= 100].reset_index(drop=True)
+        print(f"After cleaning and re-checking length, we have {len(df_w_texts)} articles.\n")
 
         df_w_texts = detect_languages_in_texts(df_w_texts, text_col='Full_Text')
         print(f"Filtering to only English articles...")
         df_w_texts = df_w_texts[df_w_texts['Language'] == 'en'].reset_index(drop=True)
         print(f"After language filtering, we have {len(df_w_texts)} English articles.\n")
-        df_w_texts['Full_Text'] = df_w_texts['Full_Text'].apply(lambda t: t.encode('ascii', 'ignore').decode('utf-8'))
+        df_w_texts['Full_Text'] = df_w_texts['Full_Text'].apply(normalize_unicode_to_ascii)
 
         protected_seed_terms = collect_seed_term_candidates(seed_lexicon)
         preprocessing_result = preprocess_pipeline(
