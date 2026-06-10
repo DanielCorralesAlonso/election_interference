@@ -80,10 +80,10 @@ def find_best_k(documents, k_values, alpha=0.2, eta=0.001, min_cf=5,
         coh_eval = tp.coherence.Coherence(m, coherence=coherence_measure, top_n=top_n)
         avg_coh = float(np.mean([coh_eval.get_score(topic_id=i) for i in range(m.k)]))
         div = _topic_diversity(m, top_n=diversity_top_n) if use_diversity else None
-        return k_val, avg_coh, div
+        return m, avg_coh, div
 
     for k_val in tqdm(k_list, desc="K search"):
-        k_val, avg_coh, div = _train_k(k_val)
+        _, avg_coh, div = _train_k(k_val)
         coherences.append(avg_coh)
         diversities.append(div)
         div_str = f"  diversity={div:.4f}" if use_diversity else ""
@@ -151,5 +151,5 @@ def find_best_k(documents, k_values, alpha=0.2, eta=0.001, min_cf=5,
     results["_meta"] = {"elbow_k": elbow_k, "max_k": max_k, "selected_k": best_k}
 
     print(f"Retraining model at selected K={best_k}...")
-    best_model = _train_k(best_k)
+    best_model, _, _ = _train_k(best_k)
     return best_k, best_model, results

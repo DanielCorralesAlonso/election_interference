@@ -11,7 +11,7 @@ from text_preprocessing import clean_scraped_text, detect_languages_in_texts, pr
 from config import custom_words_to_remove, seed_lexicon, election_dates
 from set_seeded_prior import set_seeded_prior
 from utils import print_topic_overview, print_document_topics, print_document_topics_by_country, print_corpus_topic_distribution, print_topic_coherence
-from plot import plot_topic_evolution, plot_topic_evolution_comparison, plot_document_length_distribution, plot_document_entropy_by_country, plot_topic_cooccurrence, plot_narrative_by_country, plot_narrative_stacked_area, plot_all_topics_stacked_area, plot_alpha_distribution, plot_article_count_by_country
+from plot import plot_topic_evolution, plot_topic_evolution_comparison, plot_document_length_distribution, plot_document_entropy_by_country, plot_topic_cooccurrence, plot_narrative_by_country, plot_narrative_share_by_country, plot_narrative_threshold_by_country, plot_narrative_stacked_area, plot_all_topics_stacked_area, plot_alpha_distribution, plot_article_count_by_country, plot_topic_share_of_discourse, plot_topic_threshold_evolution
 from topic_stability_analysis import run_topic_stability_pipeline
 from find_best_k import find_best_k
 from alpha_search import run_alpha_search
@@ -273,7 +273,7 @@ if __name__ == "__main__":
 
     # --- step 1: find K (optional) ------------------------------------------
     if run_k_search:
-        k_range = range(10, 70, 10)
+        k_range = range(10, 90, 10)
         k, model, k_search_results = find_best_k(
             final_documents,
             k_values=k_range,
@@ -367,6 +367,7 @@ if __name__ == "__main__":
     print_corpus_topic_distribution(mdl, topic_id_to_name=topic_id_to_name, output_dir="output", country_name=country_name)
 
     plot_article_count_by_country(df_w_texts, output_dir="output", country_name=country_name, election_dates=election_dates)
+    plot_article_count_by_country(df_w_texts, output_dir="output", country_name=country_name, election_dates=election_dates, freq='W')
     plot_document_entropy_by_country(mdl, df_w_texts, output_dir="output", country_name=country_name)
     plot_topic_cooccurrence(mdl, output_dir="output", topic_id_to_name=topic_id_to_name, country_name=country_name)
     plot_alpha_distribution(mdl, topic_id_to_name=topic_id_to_name, output_dir="output", country_name=country_name)
@@ -377,6 +378,8 @@ if __name__ == "__main__":
     country_actor_topics = sorted(_country_topic_ids)
 
     plot_topic_evolution(mdl, df_w_texts=df_w_texts, topic_id_to_name=topic_id_to_name, output_dir="output", country_name=country_name, topics_to_plot=plot_topics, theta_samples=theta_samples, show_prominence=show_prominence, show_uncertainty=show_uncertainty, election_dates=election_dates)
+    plot_topic_share_of_discourse(mdl, df_w_texts=df_w_texts, topic_id_to_name=topic_id_to_name, output_dir="output", country_name=country_name, topics_to_plot=plot_topics, election_dates=election_dates)
+    plot_topic_threshold_evolution(mdl, df_w_texts=df_w_texts, topic_id_to_name=topic_id_to_name, output_dir="output", country_name=country_name, topics_to_plot=plot_topics, election_dates=election_dates)
 
     if country_actor_topics:
         print("\nGenerating country-actor topic evolution plot...")
@@ -426,6 +429,24 @@ if __name__ == "__main__":
             output_dir="output",
             country_name=country_name,
             show_uncertainty=show_uncertainty,
+            election_dates=election_dates,
+        )
+        plot_narrative_share_by_country(
+            mdl,
+            df_w_texts=df_w_texts,
+            topic_id_to_name=topic_id_to_name,
+            narrative_topic_ids=plot_topics,
+            output_dir="output",
+            country_name=country_name,
+            election_dates=election_dates,
+        )
+        plot_narrative_threshold_by_country(
+            mdl,
+            df_w_texts=df_w_texts,
+            topic_id_to_name=topic_id_to_name,
+            narrative_topic_ids=plot_topics,
+            output_dir="output",
+            country_name=country_name,
             election_dates=election_dates,
         )
 

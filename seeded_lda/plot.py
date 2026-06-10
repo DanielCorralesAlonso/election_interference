@@ -246,16 +246,23 @@ def plot_topic_evolution(
             for spike_dt, spike_val in top_spikes.items():
                 fh.write(f"Spike week ending {spike_dt.date()} (weekly value={spike_val * 100:.1f}%)\n")
 
-                # Articles for the exact spike day.
-                day_articles = df_articles[df_articles['Event_Date'].dt.date == spike_dt.date()]
-                if day_articles.empty:
-                    fh.write("  No articles on this day.\n\n")
+                # smoothed_trends comes from resample('W'), which bins dates into
+                # (week_start, spike_dt] (right-closed, right-labeled, default
+                # week ending on Sunday). Match that range here, otherwise the
+                # weekly mean is high but no single article falls on spike_dt
+                # itself, making the spike look article-less.
+                week_start = spike_dt - pd.Timedelta(days=6)
+                week_articles = df_articles[
+                    (df_articles['Event_Date'] > week_start) & (df_articles['Event_Date'] <= spike_dt)
+                ]
+                if week_articles.empty:
+                    fh.write("  No articles in this week.\n\n")
                     continue
 
-                # Find articles for this day where this topic has non-trivial mass.
-                matched = day_articles[day_articles[col] > THRESHOLD].copy()
+                # Find articles in this week where this topic has non-trivial mass.
+                matched = week_articles[week_articles[col] > THRESHOLD].copy()
                 if matched.empty:
-                    fh.write(f"  No articles with topic prob > {THRESHOLD:.2f} on this day.\n\n")
+                    fh.write(f"  No articles with topic prob > {THRESHOLD:.2f} in this week.\n\n")
                     continue
 
                 # For each matched article, write metadata, topic distribution (>THRESHOLD), and the raw text
@@ -393,6 +400,255 @@ def plot_topic_evolution(
 
 
 
+def plot_topic_share_of_discourse(
+    mdl,
+    df_w_texts,
+    topic_id_to_name,
+    output_dir="output",
+    country_name="",
+    topics_to_plot=None,
+    election_dates=None,
+):
+    """
+    Weekly share of total discourse devoted to each topic.
+
+    LDA generates each token of document d from d's topic mixture theta_d, so
+    theta_d,k * length_d is the expected number of tokens d contributes to
+    topic k. Summing that across every article published in a week and
+    dividing by the week's total token count gives topic k's share of that
+    week's discourse.
+
+    Unlike a per-article mean of theta, this:
+      - isn't diluted by the many articles where a topic has near-zero weight,
+      - treats "many moderately-on-topic articles" and "one long, intensely
+        on-topic article" as comparable when their total token mass is similar,
+      - is normalised against that week's overall news volume, so spikes
+        reflect a shift in the *share* of attention, not just a busier week.
+
+    Document length is taken from 'Processed_Tokens' (the tokens actually fed
+    to the model) when available, falling back to 'Text_Length' or the raw
+    character count of 'Full_Text'.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    if topics_to_plot is None:
+        try:
+            topics_to_plot = sorted(topic_id_to_name.keys())
+        except Exception:
+            topics_to_plot = [0, 1, 2]
+
+    if 'Processed_Tokens' in df_w_texts.columns:
+        doc_lengths = df_w_texts['Processed_Tokens'].apply(len)
+    elif 'Text_Length' in df_w_texts.columns:
+        doc_lengths = df_w_texts['Text_Length']
+    else:
+        doc_lengths = df_w_texts['Full_Text'].apply(len)
+
+    valid_indices = set(df_w_texts.index)
+    rows = []
+    for idx, doc in enumerate(mdl.docs):
+        if idx not in valid_indices:
+            continue
+        try:
+            dist = doc.get_topic_dist()
+        except Exception:
+            continue
+        row = {'Original_Index': idx}
+        for k_id, prob in enumerate(dist):
+            row[f'Topic_{k_id}'] = prob
+        rows.append(row)
+    df_theta = pd.DataFrame(rows)
+
+    df_merged = df_w_texts[['Event_Date']].merge(
+        df_theta, left_index=True, right_on='Original_Index'
+    )
+    df_merged['Doc_Length'] = df_merged['Original_Index'].map(doc_lengths)
+    df_merged['Event_Date'] = pd.to_datetime(
+        df_merged['Event_Date'].astype(str), format='%Y%m%d', errors='coerce'
+    )
+    df_merged = df_merged.dropna(subset=['Event_Date']).set_index('Event_Date')
+
+    topic_cols = [c for c in df_merged.columns if c.startswith('Topic_')]
+
+    # Expected tokens contributed to each topic by each article.
+    weighted = df_merged[topic_cols].multiply(df_merged['Doc_Length'], axis=0)
+
+    weekly_mass  = weighted.resample('W').sum()
+    weekly_total = df_merged['Doc_Length'].resample('W').sum()
+    weekly_share = weekly_mass.div(weekly_total, axis=0).fillna(0) * 100
+
+    plt.figure(figsize=(10, 4))
+    colors = [
+        '#1f77b4', '#d62728', '#2ca02c', '#ff7f0e', '#9467bd',
+        '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf',
+    ]
+
+    for i, k_id in enumerate(topics_to_plot):
+        col = f'Topic_{k_id}'
+        if col not in weekly_share.columns:
+            continue
+        label = topic_id_to_name.get(k_id, f'Topic {k_id}')
+        plt.plot(weekly_share.index, weekly_share[col], label=label,
+                 linewidth=3, color=colors[i % len(colors)])
+
+    _lbl = _country_label(country_name)
+    fig = plt.gcf()
+    fig.suptitle(f"Share of weekly discourse by narrative{' — ' + _lbl if _lbl else ''}")
+    plt.ylabel("Share of weekly discourse (%)")
+    plt.xlabel("Date")
+
+    plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
+    plt.gca().xaxis.set_major_locator(mdates.MonthLocator(interval=1))
+    plt.xticks(rotation=45)
+
+    plt.grid(True, linestyle='--', alpha=0.6)
+    _draw_election_lines(plt.gca(), election_dates)
+    handles_leg, labels_leg = plt.gca().get_legend_handles_labels()
+    fig.legend(
+        handles_leg, labels_leg,
+        loc='upper center',
+        bbox_to_anchor=(0.5, 0.95),
+        ncol=len(topics_to_plot),
+        frameon=False,
+    )
+    plt.tight_layout()
+    plt.subplots_adjust(top=0.88)
+
+    plot_path = os.path.join(output_dir, f"topic_share_of_discourse_{country_name}.png")
+    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"Topic share-of-discourse plot saved to {plot_path}")
+
+
+def plot_topic_threshold_evolution(
+    mdl,
+    df_w_texts,
+    topic_id_to_name,
+    output_dir="output",
+    country_name="",
+    topics_to_plot=None,
+    threshold=None,
+    quantile=0.8,
+    metric="share",
+    election_dates=None,
+):
+    """
+    Weekly count (metric="count") or share (metric="share", % of that week's
+    articles) of articles whose theta_d,k exceeds a per-topic threshold.
+
+    This is closer to "how many pieces this week were substantively about
+    topic k" than either the per-article mean (plot_topic_evolution) or the
+    token-weighted share (plot_topic_share_of_discourse): it is robust to
+    background drift (articles with trace amounts of the topic don't move
+    it), doesn't depend on article length, and has natural dynamic range —
+    zero when the narrative is dormant, large when a story breaks.
+
+    By default each topic gets its own threshold — the `quantile`-th
+    percentile (default 0.9) of that topic's theta_d,k distribution across
+    the whole corpus — since topics differ widely in their typical theta
+    range and a single global cutoff would be too strict for some and too
+    loose for others. Pass an explicit `threshold` to use one fixed cutoff
+    for every topic instead.
+
+    The threshold (whichever way it's derived) is a researcher choice; check
+    that conclusions are stable across a range of quantiles/thresholds — the
+    mean and token-weighted-share plots have an implicit threshold of zero,
+    which is just a different (also arbitrary) choice.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    if topics_to_plot is None:
+        try:
+            topics_to_plot = sorted(topic_id_to_name.keys())
+        except Exception:
+            topics_to_plot = [0, 1, 2]
+
+    valid_indices = set(df_w_texts.index)
+    rows = []
+    for idx, doc in enumerate(mdl.docs):
+        if idx not in valid_indices:
+            continue
+        try:
+            dist = doc.get_topic_dist()
+        except Exception:
+            continue
+        row = {'Original_Index': idx}
+        for k_id, prob in enumerate(dist):
+            row[f'Topic_{k_id}'] = prob
+        rows.append(row)
+    df_theta = pd.DataFrame(rows)
+
+    df_merged = df_w_texts[['Event_Date']].merge(
+        df_theta, left_index=True, right_on='Original_Index'
+    )
+    df_merged['Event_Date'] = pd.to_datetime(
+        df_merged['Event_Date'].astype(str), format='%Y%m%d', errors='coerce'
+    )
+    df_merged = df_merged.dropna(subset=['Event_Date']).set_index('Event_Date')
+
+    topic_cols = [c for c in df_merged.columns if c.startswith('Topic_')]
+
+    if threshold is None:
+        thresholds = df_merged[topic_cols].quantile(quantile)
+        thresh_label = f"per-topic {quantile:.0%} pct"
+    else:
+        thresholds = pd.Series(threshold, index=topic_cols)
+        thresh_label = f"{threshold:.2f}"
+
+    above = df_merged[topic_cols] > thresholds
+    weekly_count = above.resample('W').sum()
+
+    if metric == "share":
+        weekly_total = above.resample('W').size()
+        weekly_value = weekly_count.div(weekly_total, axis=0).fillna(0) * 100
+        ylabel = f"Articles with θ > {thresh_label} (% of week's articles)"
+    else:
+        weekly_value = weekly_count
+        ylabel = f"Articles with θ > {thresh_label} (count)"
+
+    plt.figure(figsize=(10, 4))
+    colors = [
+        '#1f77b4', '#d62728', '#2ca02c', '#ff7f0e', '#9467bd',
+        '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf',
+    ]
+
+    for i, k_id in enumerate(topics_to_plot):
+        col = f'Topic_{k_id}'
+        if col not in weekly_value.columns:
+            continue
+        label = topic_id_to_name.get(k_id, f'Topic {k_id}')
+        plt.plot(weekly_value.index, weekly_value[col], label=label,
+                 linewidth=3, color=colors[i % len(colors)])
+
+    _lbl = _country_label(country_name)
+    fig = plt.gcf()
+    fig.suptitle(f"Weekly narrative presence (θ > {thresh_label}){' — ' + _lbl if _lbl else ''}")
+    plt.ylabel(ylabel)
+    plt.xlabel("Date")
+
+    plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
+    plt.gca().xaxis.set_major_locator(mdates.MonthLocator(interval=1))
+    plt.xticks(rotation=45)
+
+    plt.grid(True, linestyle='--', alpha=0.6)
+    _draw_election_lines(plt.gca(), election_dates)
+    handles_leg, labels_leg = plt.gca().get_legend_handles_labels()
+    fig.legend(
+        handles_leg, labels_leg,
+        loc='upper center',
+        bbox_to_anchor=(0.5, 0.95),
+        ncol=len(topics_to_plot),
+        frameon=False,
+    )
+    plt.tight_layout()
+    plt.subplots_adjust(top=0.88)
+
+    plot_path = os.path.join(output_dir, f"topic_threshold_evolution_{country_name}.png")
+    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"Topic threshold-evolution plot saved to {plot_path}")
+
+
 def plot_document_entropy_by_country(mdl, df_w_texts, output_dir="output", country_name="all"):
     """
     Compute the normalised Shannon entropy of each document's topic distribution
@@ -459,7 +715,7 @@ def plot_document_entropy_by_country(mdl, df_w_texts, output_dir="output", count
             palette[c] = fallback_palette(fallback_idx % 8)
             fallback_idx += 1
 
-    fig, ax = plt.subplots(figsize=(max(6, 2.5 * len(countries_present)), 6))
+    fig, ax = plt.subplots(figsize=(max(8, 2 * len(countries_present)), 6))
 
     sns.violinplot(
         data=df_ent, x=group_col, y="Norm_Entropy",
@@ -744,7 +1000,7 @@ def plot_topic_evolution_comparison(
     else:
         y_min, y_max = 0.0, 1.0
 
-    fig, axes = plt.subplots(len(country_frames), 1, figsize=(10, 3.5 * len(country_frames)), sharex=True, sharey=True)
+    fig, axes = plt.subplots(len(country_frames), 1, figsize=(8, 2 * len(country_frames)), sharex=True, sharey=True)
     if len(country_frames) == 1:
         axes = [axes]
 
@@ -939,6 +1195,289 @@ def plot_narrative_by_country(
     fig.savefig(plot_path, dpi=300, bbox_inches='tight')
     plt.close(fig)
     print(f'Cross-country narrative comparison plot saved to {plot_path}')
+
+
+def plot_narrative_share_by_country(
+    mdl,
+    df_w_texts,
+    topic_id_to_name,
+    narrative_topic_ids,
+    output_dir="output",
+    country_name="all",
+    n_cols=3,
+    election_dates=None,
+):
+    """
+    Same panel-per-narrative / line-per-country layout as
+    plot_narrative_by_country, but each line shows the topic's share of that
+    country's weekly discourse (see plot_topic_share_of_discourse) — i.e.
+    theta_d,k weighted by document length and normalised against the
+    country's total weekly token count — instead of the per-article mean
+    theta.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    if 'Country' not in df_w_texts.columns:
+        print('plot_narrative_share_by_country: no Country column, skipping.')
+        return
+
+    all_countries = list(df_w_texts['Country'].dropna().unique())
+    if not all_countries:
+        return
+    countries = sorted(all_countries, key=lambda c: (_ACTOR_PRIORITY.get(c.strip().lower(), 99), c))
+
+    fallback_iter = iter(_FALLBACK_COLORS)
+    color_map = {}
+    for c in countries:
+        key = c.strip().lower()
+        color_map[c] = _ACTOR_COLORS.get(key, next(fallback_iter, '#333333'))
+
+    if 'Processed_Tokens' in df_w_texts.columns:
+        doc_lengths = df_w_texts['Processed_Tokens'].apply(len)
+    elif 'Text_Length' in df_w_texts.columns:
+        doc_lengths = df_w_texts['Text_Length']
+    else:
+        doc_lengths = df_w_texts['Full_Text'].apply(len)
+
+    valid_indices = set(df_w_texts.index)
+    rows = []
+    for idx, doc in enumerate(mdl.docs):
+        if idx not in valid_indices:
+            continue
+        try:
+            dist = doc.get_topic_dist()
+        except Exception:
+            continue
+        row = {'Original_Index': idx}
+        for k_id, prob in enumerate(dist):
+            row[f'Topic_{k_id}'] = prob
+        rows.append(row)
+    df_theta = pd.DataFrame(rows)
+
+    df_merged = df_w_texts[['Event_Date', 'Country']].merge(
+        df_theta, left_index=True, right_on='Original_Index'
+    )
+    df_merged['Doc_Length'] = df_merged['Original_Index'].map(doc_lengths)
+    df_merged['Event_Date'] = pd.to_datetime(
+        df_merged['Event_Date'].astype(str), format='%Y%m%d', errors='coerce'
+    )
+    df_merged = df_merged.dropna(subset=['Event_Date']).set_index('Event_Date')
+
+    n_topics = len(narrative_topic_ids)
+    if n_topics <= 3:
+        n_cols = n_topics
+    else:
+        n_cols = min(n_cols, n_topics)
+    n_rows = int(np.ceil(n_topics / n_cols))
+
+    panel_w, panel_h = 4.5, 3.2
+    fig, axes = plt.subplots(
+        n_rows, n_cols,
+        figsize=(panel_w * n_cols, panel_h * n_rows),
+        sharey=True,
+    )
+    axes_flat = np.array(axes).flatten() if n_topics > 1 else [axes]
+
+    for ax_idx, nid in enumerate(narrative_topic_ids):
+        ax  = axes_flat[ax_idx]
+        col = f'Topic_{nid}'
+        narrative_label = topic_id_to_name.get(nid, f'Topic {nid}')
+
+        if col not in df_merged.columns:
+            ax.set_visible(False)
+            continue
+
+        for country in countries:
+            country_data = df_merged[df_merged['Country'] == country]
+            if country_data.empty:
+                continue
+            weighted     = country_data[col] * country_data['Doc_Length']
+            weekly_mass  = weighted.resample('W').sum()
+            weekly_total = country_data['Doc_Length'].resample('W').sum()
+            weekly_share = (weekly_mass / weekly_total).fillna(0) * 100
+            color   = color_map[country]
+            display = _COUNTRY_NAMES.get(country.strip().lower(), country)
+            ax.plot(weekly_share.index, weekly_share.values, label=display, linewidth=1.8, color=color)
+
+        ax.set_title(narrative_label)
+        ax.set_ylabel('Share of weekly discourse (%)')
+        ax.grid(True, linestyle='--', alpha=0.4)
+        _draw_election_lines(ax, election_dates)
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %y'))
+        ax.xaxis.set_major_locator(mdates.MonthLocator(interval=2))
+        plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
+        plt.setp(ax.get_yticklabels())
+
+    for ax_idx in range(n_topics, len(axes_flat)):
+        axes_flat[ax_idx].set_visible(False)
+
+    _lbl = _country_label(country_name)
+    fig.suptitle(
+        f'Cross-country narrative share of discourse{" — " + _lbl if _lbl else ""}',
+    )
+    handles, labels = axes_flat[0].get_legend_handles_labels()
+    if handles:
+        fig.legend(
+            handles, labels,
+            loc='upper center',
+            bbox_to_anchor=(0.5, 0.96),
+            ncol=len(labels),
+            frameon=False,
+        )
+    fig.tight_layout(rect=[0, 0, 1, 1])
+    plot_path = os.path.join(output_dir, f'narrative_share_by_country_{country_name}.png')
+    fig.savefig(plot_path, dpi=300, bbox_inches='tight')
+    plt.close(fig)
+    print(f'Cross-country narrative share-of-discourse plot saved to {plot_path}')
+
+
+def plot_narrative_threshold_by_country(
+    mdl,
+    df_w_texts,
+    topic_id_to_name,
+    narrative_topic_ids,
+    output_dir="output",
+    country_name="all",
+    n_cols=3,
+    threshold=None,
+    quantile=0.85,
+    metric="share",
+    election_dates=None,
+):
+    """
+    Same panel-per-narrative / line-per-country layout as
+    plot_narrative_by_country, but each line is the weekly count
+    (metric="count") or share (metric="share", % of that country's articles
+    that week) with theta_d,k above a per-topic threshold — see
+    plot_topic_threshold_evolution for the rationale.
+
+    By default each topic's threshold is the `quantile`-th percentile
+    (default 0.9) of theta_d,k across the whole corpus (all countries
+    combined), so every country is held to the same per-topic bar. Pass an
+    explicit `threshold` to use one fixed cutoff for every topic instead.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    if 'Country' not in df_w_texts.columns:
+        print('plot_narrative_threshold_by_country: no Country column, skipping.')
+        return
+
+    all_countries = list(df_w_texts['Country'].dropna().unique())
+    if not all_countries:
+        return
+    countries = sorted(all_countries, key=lambda c: (_ACTOR_PRIORITY.get(c.strip().lower(), 99), c))
+
+    fallback_iter = iter(_FALLBACK_COLORS)
+    color_map = {}
+    for c in countries:
+        key = c.strip().lower()
+        color_map[c] = _ACTOR_COLORS.get(key, next(fallback_iter, '#333333'))
+
+    valid_indices = set(df_w_texts.index)
+    rows = []
+    for idx, doc in enumerate(mdl.docs):
+        if idx not in valid_indices:
+            continue
+        try:
+            dist = doc.get_topic_dist()
+        except Exception:
+            continue
+        row = {'Original_Index': idx}
+        for k_id, prob in enumerate(dist):
+            row[f'Topic_{k_id}'] = prob
+        rows.append(row)
+    df_theta = pd.DataFrame(rows)
+
+    df_merged = df_w_texts[['Event_Date', 'Country']].merge(
+        df_theta, left_index=True, right_on='Original_Index'
+    )
+    df_merged['Event_Date'] = pd.to_datetime(
+        df_merged['Event_Date'].astype(str), format='%Y%m%d', errors='coerce'
+    )
+    df_merged = df_merged.dropna(subset=['Event_Date']).set_index('Event_Date')
+
+    n_topics = len(narrative_topic_ids)
+    if n_topics <= 3:
+        n_cols = n_topics
+    else:
+        n_cols = min(n_cols, n_topics)
+    n_rows = int(np.ceil(n_topics / n_cols))
+
+    panel_w, panel_h = 4.5, 3.2
+    fig, axes = plt.subplots(
+        n_rows, n_cols,
+        figsize=(panel_w * n_cols, panel_h * n_rows),
+        sharey=True,
+    )
+    axes_flat = np.array(axes).flatten() if n_topics > 1 else [axes]
+
+    topic_cols = [f'Topic_{nid}' for nid in narrative_topic_ids if f'Topic_{nid}' in df_merged.columns]
+    if threshold is None:
+        thresholds = df_merged[topic_cols].quantile(quantile)
+        thresh_label = f"per-topic {quantile:.0%} pct"
+    else:
+        thresholds = pd.Series(threshold, index=topic_cols)
+        thresh_label = f"{threshold:.2f}"
+
+    if metric == "share":
+        ylabel = f"Articles with θ > {thresh_label} (%)"
+    else:
+        ylabel = f"Articles with θ > {thresh_label} (count)"
+
+    for ax_idx, nid in enumerate(narrative_topic_ids):
+        ax  = axes_flat[ax_idx]
+        col = f'Topic_{nid}'
+        narrative_label = topic_id_to_name.get(nid, f'Topic {nid}')
+
+        if col not in df_merged.columns:
+            ax.set_visible(False)
+            continue
+
+        for country in countries:
+            country_data = df_merged[df_merged['Country'] == country]
+            if country_data.empty:
+                continue
+            above = country_data[col] > thresholds[col]
+            weekly_count = above.resample('W').sum()
+            if metric == "share":
+                weekly_total = above.resample('W').size()
+                weekly_value = (weekly_count / weekly_total).fillna(0) * 100
+            else:
+                weekly_value = weekly_count
+            color   = color_map[country]
+            display = _COUNTRY_NAMES.get(country.strip().lower(), country)
+            ax.plot(weekly_value.index, weekly_value.values, label=display, linewidth=1.8, color=color)
+
+        ax.set_title(narrative_label)
+        ax.set_ylabel(ylabel)
+        ax.grid(True, linestyle='--', alpha=0.4)
+        _draw_election_lines(ax, election_dates)
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %y'))
+        ax.xaxis.set_major_locator(mdates.MonthLocator(interval=2))
+        plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
+        plt.setp(ax.get_yticklabels())
+
+    for ax_idx in range(n_topics, len(axes_flat)):
+        axes_flat[ax_idx].set_visible(False)
+
+    _lbl = _country_label(country_name)
+    fig.suptitle(
+        f'Cross-country narrative presence (θ > {thresh_label}){" — " + _lbl if _lbl else ""}',
+    )
+    handles, labels = axes_flat[0].get_legend_handles_labels()
+    if handles:
+        fig.legend(
+            handles, labels,
+            loc='upper center',
+            bbox_to_anchor=(0.5, 0.96),
+            ncol=len(labels),
+            frameon=False,
+        )
+    fig.tight_layout(rect=[0, 0, 1, 1])
+    plot_path = os.path.join(output_dir, f'narrative_threshold_by_country_{country_name}.png')
+    fig.savefig(plot_path, dpi=300, bbox_inches='tight')
+    plt.close(fig)
+    print(f'Cross-country narrative threshold plot saved to {plot_path}')
 
 
 def plot_narrative_stacked_area(
@@ -1251,12 +1790,14 @@ def plot_alpha_distribution(mdl, topic_id_to_name, output_dir="output", country_
 
 
 def plot_article_count_by_country(df_w_texts, output_dir="output", country_name="",
-                                   election_dates=None):
-    """One stacked panel per country showing raw daily article count.
+                                   election_dates=None, freq='D'):
+    """One stacked panel per country showing raw article counts.
 
     Requires 'Event_Date' (YYYYMMDD int or str) and 'Country' columns in
     df_w_texts. Panels share the y-axis scale; only the bottom panel carries
     x-tick labels.
+
+    freq: 'D' for daily counts, 'W' for weekly counts.
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -1274,24 +1815,30 @@ def plot_article_count_by_country(df_w_texts, output_dir="output", country_name=
     )
     n = len(countries)
 
-    fig, axes = plt.subplots(n, 1, figsize=(14, 3.5 * n), sharey=True, sharex=True)
+    freq_label = {'D': 'Daily', 'W': 'Weekly'}.get(freq, freq)
+    suffix = {'D': '', 'W': '_weekly'}.get(freq, f'_{freq.lower()}')
+
+    fig, axes = plt.subplots(n, 1, figsize=(8, 2 * n), sharey=True, sharex=True)
     if n == 1:
         axes = [axes]
+
+    full_range = pd.date_range(df['Event_Date'].min(), df['Event_Date'].max(), freq=freq)
 
     for ax, country in zip(axes, countries):
         color   = _ACTOR_COLORS.get(country.strip().lower(), '#888888')
         display = _COUNTRY_NAMES.get(country.strip().lower(), country)
 
-        mask  = df['Country'] == country
-        daily = df[mask].groupby('Event_Date').size()
-        full_range = pd.date_range(df['Event_Date'].min(), df['Event_Date'].max(), freq='D')
-        daily = daily.reindex(full_range, fill_value=0)
+        mask   = df['Country'] == country
+        counts = df[mask].groupby('Event_Date').size()
+        if freq != 'D':
+            counts = counts.resample(freq).sum()
+        counts = counts.reindex(full_range, fill_value=0)
 
-        ax.plot(daily.index, daily.values, color=color, linewidth=1.0,
-                marker='o', markersize=3, markerfacecolor=color, markeredgewidth=0)
+        ax.plot(counts.index, counts.values, color=color, linewidth=2.0,
+                marker='o', markersize=4, markerfacecolor=color, markeredgewidth=0)
 
         ax.set_title(f'{display} Activity', color=color)
-        ax.set_ylabel('Daily News')
+        ax.set_ylabel(f'{freq_label} News')
         ax.grid(True, axis='both', linestyle='--', alpha=0.5)
         _draw_election_lines(ax, election_dates)
 
@@ -1300,7 +1847,7 @@ def plot_article_count_by_country(df_w_texts, output_dir="output", country_name=
     axes[-1].set_xlabel(f'Timeline ({df["Event_Date"].dt.year.mode()[0]})')
 
     fig.tight_layout()
-    plot_path = os.path.join(output_dir, f'article_count_by_country_{country_name}.png')
+    plot_path = os.path.join(output_dir, f'article_count_by_country_{country_name}{suffix}.png')
     fig.savefig(plot_path, dpi=300, bbox_inches='tight')
     plt.close(fig)
     print(f'Article count plot saved to {plot_path}')
