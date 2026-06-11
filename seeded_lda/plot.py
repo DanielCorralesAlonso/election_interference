@@ -104,6 +104,19 @@ def _draw_election_lines(ax, election_dates):
         ax.axvline(dt, color='black', linestyle='--', linewidth=1.0, alpha=0.6)
 
 
+def _doc_lengths(df_w_texts):
+    """Per-article length used to weight theta_d,k into expected token mass.
+
+    Prefers 'Processed_Tokens' (the tokens actually fed to the model),
+    falling back to 'Text_Length' or the raw character count of 'Full_Text'.
+    """
+    if 'Processed_Tokens' in df_w_texts.columns:
+        return df_w_texts['Processed_Tokens'].apply(len)
+    if 'Text_Length' in df_w_texts.columns:
+        return df_w_texts['Text_Length']
+    return df_w_texts['Full_Text'].apply(len)
+
+
 def plot_topic_evolution(
     mdl,
     df_w_texts,
@@ -215,12 +228,25 @@ def plot_topic_evolution(
     # For each selected topic, find the top 3 weekly peaks and save the
     # original articles occurring in the week of the peak whose topic
     # probability for any topic is > 0.05.
+    #
+    # Spikes are ranked by share of weekly discourse (token-weighted, see
+    # plot_topic_share_of_discourse) rather than the per-article mean: a week
+    # with one long, heavily-on-topic article and a week with many short,
+    # mildly-on-topic articles can have similar means, but the former
+    # represents much less actual coverage of the narrative.
     spikes_dir = os.path.join(output_dir, "spikes")
     os.makedirs(spikes_dir, exist_ok=True)
     spikes_path = os.path.join(spikes_dir, f"spikes_{country_name.replace(' ','_')}.txt")
 
     # Work with a copy that still has article-level rows and Event_Date as column
     df_articles = df_final.reset_index()
+
+    doc_lengths = _doc_lengths(df_w_texts)
+    df_final['Doc_Length'] = df_final['Original_Index'].map(doc_lengths)
+    weighted_topics = df_final[topic_cols].multiply(df_final['Doc_Length'], axis=0)
+    weekly_mass  = weighted_topics.resample('W').sum()
+    weekly_total = df_final['Doc_Length'].resample('W').sum()
+    weekly_share = weekly_mass.div(weekly_total, axis=0).fillna(0)
 
     THRESHOLD = 0.05
     TOP_K = 3
@@ -231,25 +257,25 @@ def plot_topic_evolution(
 
         for k_id in topics_to_plot:
             col = f"Topic_{k_id}"
-            if col not in smoothed_trends.columns:
+            if col not in weekly_share.columns:
                 continue
 
             fh.write(f"Topic {k_id} - {topic_label(k_id)}\n")
             fh.write('-' * 60 + "\n")
 
-            # Get the top TOP_K day-level spike dates and their magnitudes.
-            top_spikes = smoothed_trends[col].nlargest(TOP_K)
+            # Get the top TOP_K weekly spikes by share of weekly discourse.
+            top_spikes = weekly_share[col].nlargest(TOP_K)
             if top_spikes.empty:
                 fh.write("No spikes found.\n\n")
                 continue
 
             for spike_dt, spike_val in top_spikes.items():
-                fh.write(f"Spike week ending {spike_dt.date()} (weekly value={spike_val * 100:.1f}%)\n")
+                fh.write(f"Spike week ending {spike_dt.date()} (share of weekly discourse={spike_val * 100:.1f}%)\n")
 
-                # smoothed_trends comes from resample('W'), which bins dates into
+                # weekly_share comes from resample('W'), which bins dates into
                 # (week_start, spike_dt] (right-closed, right-labeled, default
                 # week ending on Sunday). Match that range here, otherwise the
-                # weekly mean is high but no single article falls on spike_dt
+                # weekly share is high but no single article falls on spike_dt
                 # itself, making the spike look article-less.
                 week_start = spike_dt - pd.Timedelta(days=6)
                 week_articles = df_articles[
@@ -437,12 +463,7 @@ def plot_topic_share_of_discourse(
         except Exception:
             topics_to_plot = [0, 1, 2]
 
-    if 'Processed_Tokens' in df_w_texts.columns:
-        doc_lengths = df_w_texts['Processed_Tokens'].apply(len)
-    elif 'Text_Length' in df_w_texts.columns:
-        doc_lengths = df_w_texts['Text_Length']
-    else:
-        doc_lengths = df_w_texts['Full_Text'].apply(len)
+    doc_lengths = _doc_lengths(df_w_texts)
 
     valid_indices = set(df_w_texts.index)
     rows = []
@@ -528,7 +549,7 @@ def plot_topic_threshold_evolution(
     country_name="",
     topics_to_plot=None,
     threshold=None,
-    quantile=0.8,
+    quantile=0.95,
     metric="share",
     election_dates=None,
 ):
@@ -1232,12 +1253,7 @@ def plot_narrative_share_by_country(
         key = c.strip().lower()
         color_map[c] = _ACTOR_COLORS.get(key, next(fallback_iter, '#333333'))
 
-    if 'Processed_Tokens' in df_w_texts.columns:
-        doc_lengths = df_w_texts['Processed_Tokens'].apply(len)
-    elif 'Text_Length' in df_w_texts.columns:
-        doc_lengths = df_w_texts['Text_Length']
-    else:
-        doc_lengths = df_w_texts['Full_Text'].apply(len)
+    doc_lengths = _doc_lengths(df_w_texts)
 
     valid_indices = set(df_w_texts.index)
     rows = []
@@ -1340,7 +1356,7 @@ def plot_narrative_threshold_by_country(
     country_name="all",
     n_cols=3,
     threshold=None,
-    quantile=0.85,
+    quantile=0.90,
     metric="share",
     election_dates=None,
 ):
